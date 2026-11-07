@@ -1,0 +1,2 @@
+// Windows resources: the app icon (assets/raven.ico, drawn by tools/make_icon.py). SDL uses ID 101 for the window.
+101 ICON "../assets/raven.ico"
