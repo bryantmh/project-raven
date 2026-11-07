@@ -36,14 +36,31 @@ passes are untouched):
   The mouse aim is scaled out by the same factor so the crosshair stays under the pointer, and the stick moves
   faster on that axis to keep its on-screen speed (`game::menu_aim_squeeze`). Corners isn't used in menus: it moves
   elements past 60% of the width outward, which pulls items apart from their labels and would make a crosshair jump.
-- In missions crosshairs are left where the game draws them, so they stay on what the shot hits. The game smooths the guns, so
-  while aiming moves a crosshair trails the aim by 2–4 frames and matches no exact aim value; picking crosshairs by
-  position made them flip between moved and unmoved (the reticle "jumped"). Instead they are recognized by bound
-  texture and shape, y scale over x scale (`gl::bound_texture0()`); not size, since crosshairs pulse while firing.
-  An element is learned as a crosshair once it has travelled across the screen and then either sits on an aim
-  resting off-center or follows the recent aim path (`input::aim_history`) for 5 draws. Gameplay crosshairs get new
-  texture ids per level and are learned within their first few frames. Learned ones are exempt from then on.
-  `RAVEN_XHAIRDEBUG=1` logs every element drawn near the aim (game position, drawn position, aim).
+- Two kinds of element keep the game's own matrix. They can't be told apart when the matrix is uploaded (the game
+  sets the element's vertex pointer after it), so the adjusted matrix is uploaded as usual and stashed; around the
+  next draw call (`ui_before_draw` / `ui_after_draw`, called from gl_bridge.cpp's glDrawArrays / glDrawElements /
+  glDrawRangeElements wrappers) the draw's mesh and texture decide, and if needed the original matrix is uploaded
+  for that draw only and the adjusted one put back after.
+  - **Screen overlays** (the turret view frame in Mission 1, ...) stretch to the screen in every layout. They are
+    recognized by extent: the vertices the draw uses (from the indices, or `first` / `count`) mapped through the
+    matrix reach |x| >= 0.97 on both sides. Positions come from client memory, or for meshes in a vertex buffer are
+    read back once with `glGetBufferSubData` and cached. A single quad exactly the size of the canvas is not an
+    overlay: the game draws some canvas content into a texture first and shows it that way (the mission select's
+    highlight frame), and movie planes are such quads too (filled by `draw_movie_scaled`). Those are laid out like
+    other elements; stretching them put the highlight frame off its tile and stretched movies twice.
+  - **Crosshairs in missions** stay where the game draws them, on what the shot hits. The game smooths the guns, so
+    a moving crosshair trails the aim by 2-4 frames and matches no exact aim value; picking crosshairs by position
+    made them flip between moved and unmoved (the reticle "jumped"). Instead they are keyed by bound texture
+    (`gl::bound_texture0()`) and sprite: the uv rectangle read from the first enabled 2-component float attribute
+    (the HUD packs many icons into one atlas, so the texture alone isn't enough; size isn't used since crosshairs
+    pulse while firing). A key is learned as a crosshair when its element sits on an aim resting off-center or
+    follows the recent aim path (`input::aim_history`) for 5 draws. Gameplay crosshairs get new texture ids per
+    level and are learned within their first few frames.
+- Only screen-space matrices are adjusted (|translation| <= 1.5): 3D objects drawn through 2D cameras (menu tiles)
+  are left alone.
+- Debug: `RAVEN_UIDEBUG=1` logs each element once (texture, sprite, scale, position, extent, what was done);
+  `RAVEN_XHAIRDEBUG=1` logs every element drawn near the aim (game position, drawn position, aim);
+  `RAVEN_BIGDEBUG=1` logs large elements at upload.
 
 Changing the projection per camera instead does not work: full-screen layers (menu backgrounds, the 3D view composite)
 are drawn through the same 2D cameras and get squeezed.
@@ -58,15 +75,34 @@ files are edited as they load (`RAVEN_DUMP_SCRIPTS=<folder>` saves every decrypt
 | Hide "Money In" / "FREEPLAY" | `attract_2d/moneyin_txt`, `attract_2d/MoneyIn_Cost{,2}`, `moneyin_game/MoneyInGame_Cost{,2}` | HIDE, then sleep forever |
 | No menu countdown | `game_select2/gamesel_time{,_r}` | `KILLPRIME` in place of `UI_TIMER_START 30,0` (no timer, no timeout) |
 | Hide QR scanner notices | `attract_2d/qr_scanner_{config,p1,p2}`, `perm/webcam_notfound1-4` | HIDE, then sleep forever |
+| Hide player 2's "JOIN NOW / Press START" panel (off by default) | `moneyin_game/CashPlay_P4_Msg`, `join_plaq_p4`, `join_in_p4_movie`, `NoStart_P4_Msg` | `KILLPRIME` at the start |
+| Start skips mission movies | `level_<n>/intro_movie/skip_text` | HIDE (the menu code draws its own prompt) |
 
 Skip Xbox screen: code patch at `0x4493f8` (docs/functions.md). Boot image: the message screen `0x4fc460` is replaced
 by `assets/boot.jpg`, drawn with a framebuffer blit (src/game/boot_screen.cpp).
 
+## Mission movies
+
+- **Fill wide screens** (src/gl/gl_bridge.cpp, "Mission movies fill wide screens"): movies are 16:9 frames (1920x1079,
+  YUV planes on texture units 0-2) with the film, about 2.21:1 (1920x867), letterboxed inside. The game fits the frame
+  to the screen height. A movie texture is recognized by its repeated large uploads (`gl::is_video_texture`). Draw
+  calls that sample one on unit 0 over the full frame get a viewport scaled by the view aspect over 16:9 around the
+  center: the film fills the width (a 2.39:1 screen cuts about 7% of its height). On 16:9 nothing changes.
+- **Start skips** (src/game/movie_skip.cpp, "Start skips mission movies"): the movie script `level_<n>/intro_movie/
+  movie_skip` shows its prompt after any input (trigger `SHOW_MOVIE_SKIP`), then waits for a reload press
+  (`GAME_WAITFORINPUT 1,1,1,1,0,1,0,1`) and fires `MOVIE_SKIP`; movies end with `intro_movie_done` /
+  `outro_movie_done`. Trigger set counts are polled each frame (src/game/triggers.cpp). While the prompt is up, a Start
+  press sends that player's reload press for 3 frames and the Reload action is ignored. The game's "Press RELOAD to
+  skip" texture (`intro_movie/skip_text`) is hidden, and the menu code draws "Press <icon> to skip" in Bahnschrift with
+  the Start binding's icon (the controller's, else the keyboard key).
+
 ## Settings menu (src/ui/menu.cpp)
 
 Dear ImGui over the game's GL context. Select / F1 opens it; the game thread stays in the hooked swap running the
-menu (the last frame kept in a texture) and FMOD's master channel group is paused. Test hooks: `RAVEN_MENU_AT`,
-`RAVEN_MENU_SECONDS`, `RAVEN_MENU_TAB`.
+menu (the last frame kept in a texture) and FMOD's master channel group is paused. Test hooks: `RAVEN_MENU_AT`
+(open after that many seconds), `RAVEN_MENU_SECONDS` (close after), `RAVEN_MENU_TAB` (0 General, 1 Display,
+2 Controls, 3 Presentation), `RAVEN_MENU_SCROLL`, `RAVEN_MENU_ICONS` (1 Xbox, 2 PlayStation). Periodic shots
+(`RAVEN_SHOT_SECONDS`) keep running while it's open; the script's `shot:` doesn't, since game input is paused.
 
 ## Icon
 
@@ -76,4 +112,9 @@ embedded through src/raven.rc and used for the window.
 ## Testing without a window
 
 `python tools/hidden_run.py --seconds N --env K=V ...` runs raven.exe on its own hidden desktop (muted, no popups).
-`RAVEN_SHOT=<path with %d>`, `RAVEN_SHOT_SECONDS` and `RAVEN_SHOT_BURST` save frames.
+`RAVEN_SHOT=<path with %d>`, `RAVEN_SHOT_SECONDS` and `RAVEN_SHOT_BURST` save frames. Runs default to a
+1720x720 window (`--res WxH` sets `RAVEN_TEST_RES`, which forces windowed at that window and render size) to keep
+test load low. Give each run a `RAVEN_SAVE_DIR` with a config.json whose `game_folder` is set, or the run waits at
+the folder picker. `RAVEN_TEST_TRIGGER="sec:name,..."` fires game triggers (src/game/triggers.cpp) to reach scenes
+directly: `60:poa_overlay_go,61:s1_osb_disp,62:space_battle_transition_go` reaches the Mission 1 turret overlay.
+`RAVEN_TRIGDEBUG=1` logs trigger set counts.

@@ -9,6 +9,9 @@ in at that library layer.
 
 The game files are never copied or changed. `raven.exe` reads them from the folder you point it at (Settings > Game
 folder), and anything the game writes (settings, audits, high scores) goes to Project Raven's own save folder.
+The folder must contain both `halo/` (with `halo/game`) and `dump/`: `halo.so` answers the game's dongle queries from
+`dump/`, and without it the game crashes during startup (in `localizationInit`). `game_folder_ok` (src/main.cpp)
+checks both and asks for the folder again if either is missing.
 
 ## The game files
 
@@ -47,7 +50,9 @@ init=0x11374e0 (__libc_csu_init), fini=0x1137550, rtld_fini, stack_end)`.
 1. Reserve `0x400000-0x2400000` before anything else in the process can take it, then copy the two `PT_LOAD`
    segments of `game` in (they are file-backed byte for byte, RWX).
 2. Map the Linux C++ runtime (`runtime/linux/libstdc++.so.6`, `libgcc_s.so.1`, fetched from Debian 12 by
-   `tools/fetch_runtime.py`) with the same ELF loader, applying their relocations. The game's C++ code calls
+   `tools/fetch_runtime.py`, embedded in raven.exe and unpacked by src/app/runtime_pack.cpp into
+   `%LOCALAPPDATA%\ProjectRaven\runtime\<hash>` with OpenBLAS, FMOD and the boot image) with the same ELF loader,
+   applying their relocations. The game's C++ code calls
    libstdc++ through vtables with the SysV calling convention, so it needs the real Linux build, not MSVC's or
    MinGW's.
 3. Resolve every import (embedded table + dynamic relocations) by name: first the shim table (`src/linux/`), then the

@@ -13,9 +13,9 @@
 namespace {
 HMODULE blas() {
     static HMODULE h = [] {
-        auto p = std::filesystem::path(raven::app::to_wide(raven::app::paths().exe_dir)) / L"runtime" / L"windows" / L"libopenblas.dll";
+        auto p = std::filesystem::path(raven::app::to_wide(raven::app::paths().runtime_dir)) / L"runtime" / L"windows" / L"libopenblas.dll";
         HMODULE m = LoadLibraryW(p.c_str());
-        if (!m) raven::log_fatal("The game needs LAPACK: runtime\\windows\\libopenblas.dll is missing (run tools/fetch_runtime.py).");
+        if (!m) raven::log_fatal("The game needs LAPACK: libopenblas.dll is missing from the unpacked runtime files.");
         return m;
     }();
     return h;

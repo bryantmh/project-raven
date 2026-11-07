@@ -1,5 +1,6 @@
 #pragma once
 // Settings, stored as flat JSON in <save>/config.json. Every setting the recomp menu shows lives here.
+#include <map>
 #include <string>
 
 namespace raven::app {
@@ -24,11 +25,17 @@ struct Config {
     bool skip_xbox_screen = true;   // skip the Xbox Live "Get Connected" boot screen
     bool hide_qr_notices = true;    // no QR scanner (webcam) notices
     bool boot_image = true;         // show assets/boot.jpg instead of the boot text
+    bool start_skips_movies = true; // Start skips mission movies, with the Start button's icon in the prompt
+    bool movies_fill = true;        // mission movies fill wide screens (src/gl/gl_bridge.cpp)
+    bool hide_p2_join = false;      // hide player 2's "JOIN NOW / Press START" panel
 
     // Controls (src/input/input.cpp)
     int rumble = 100;        // controller rumble strength, percent (0 = off)
     int aim_speed = 100;     // controller stick aim speed, percent
     int aim_deadzone = 15;   // controller stick deadzone, percent
+    int button_icons = 0;         // Controls tab icons: 0 = match the controller, 1 = Xbox, 2 = PlayStation
+    bool kbm_own_player = false;  // keyboard & mouse is player 1 and controllers start at player 2 (else they share)
+    std::map<std::string, std::string> binds;  // "pad_<action>" / "key_<action>" -> "slot1|slot2" (src/input/bindings.cpp)
 
     int version = 4;
 };

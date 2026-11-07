@@ -38,15 +38,27 @@ target_link_libraries(imgui PUBLIC SDL2::SDL2-static)
 
 file(GLOB_RECURSE RAVEN_SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.c)
 list(APPEND RAVEN_SOURCES src/raven.rc)  # the app icon
+
+# The runtime files (Linux C++ runtime and OpenBLAS from tools/fetch_runtime.py, FMOD from tools/fetch_fmod.py, the
+# boot image) are compressed into one blob embedded in raven.exe, which unpacks it on first run
+# (src/app/runtime_pack.cpp): the exe is the whole download.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(RAVEN_PACKED runtime/linux/libstdc++.so.6 runtime/linux/libgcc_s.so.1 runtime/windows/libopenblas.dll
+    runtime/windows/fmod64.dll runtime/windows/fmodstudio64.dll assets/boot.jpg)
+list(TRANSFORM RAVEN_PACKED PREPEND ${CMAKE_SOURCE_DIR}/ OUTPUT_VARIABLE RAVEN_PACKED_FILES)
+add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/runtime.pak
+    COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tools/pack_runtime.py ${CMAKE_BINARY_DIR}/runtime.pak ${CMAKE_SOURCE_DIR} ${RAVEN_PACKED}
+    DEPENDS ${RAVEN_PACKED_FILES} ${CMAKE_SOURCE_DIR}/tools/pack_runtime.py
+    COMMENT "Packing the runtime files")
+file(WRITE ${CMAKE_BINARY_DIR}/runtime_pack.rc "300 RCDATA \"${CMAKE_BINARY_DIR}/runtime.pak\"
+")
+set_source_files_properties(${CMAKE_BINARY_DIR}/runtime_pack.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_BINARY_DIR}/runtime.pak)
+list(APPEND RAVEN_SOURCES ${CMAKE_BINARY_DIR}/runtime_pack.rc)
 add_executable(raven ${RAVEN_SOURCES})
 target_include_directories(raven PRIVATE src)
 target_compile_definitions(raven PRIVATE SDL_MAIN_HANDLED NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 target_compile_options(raven PRIVATE -mfsgsbase -Wno-unused-parameter -Wno-c99-designator -Wno-gnu-zero-variadic-macro-arguments)
-target_link_libraries(raven PRIVATE imgui mimalloc-static SDL2::SDL2-static opengl32 glu32 synchronization ole32 shell32 bcrypt ws2_32 dbghelp winmm windowscodecs)
+target_link_libraries(raven PRIVATE imgui mimalloc-static SDL2::SDL2-static opengl32 glu32 synchronization ole32 shell32 bcrypt ws2_32 dbghelp winmm windowscodecs cabinet)
 # Keep the game's fixed range (0x400000-0x2400000) free: the exe goes high, with ASLR.
 # A windowed app (no console); the log goes to %APPDATA%\\ProjectRaven\\raven.log and to stdout when redirected.
 target_link_options(raven PRIVATE -Wl,/BASE:0x140000000 -Wl,/STACK:16777216 -Wl,/SUBSYSTEM:WINDOWS -Wl,/ENTRY:mainCRTStartup)
-# runtime/ (Linux C++ runtime from tools/fetch_runtime.py, the FMOD DLL) goes next to raven.exe.
-add_custom_command(TARGET raven POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/runtime $<TARGET_FILE_DIR:raven>/runtime)
-# assets/ (the boot image) goes next to raven.exe.
-add_custom_command(TARGET raven POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:raven>/assets)

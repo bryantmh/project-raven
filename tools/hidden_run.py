@@ -147,11 +147,15 @@ def main():
     ap.add_argument("--desktop", default="RavenTest")
     ap.add_argument("--resize", action="append", default=[], help="SEC:W:H (client size), repeatable")
     ap.add_argument("--winlog", type=float, default=0)
+    ap.add_argument("--res", default="1720x720",
+                    help="test resolution, windowed (RAVEN_TEST_RES; 720p tall, ultrawide 2.39:1); 'native' keeps the config's")
     ap.add_argument("args", nargs="*")
     a = ap.parse_args()
 
     env = dict(os.environ)
     env.update(RAVEN_MUTE="1", RAVEN_HEADLESS="1")
+    if a.res != "native":
+        env["RAVEN_TEST_RES"] = a.res
     for kv in a.env:
         k, _, v = kv.partition("=")
         env[k] = v

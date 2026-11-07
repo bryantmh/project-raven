@@ -46,6 +46,10 @@ void apply_patches() {
     }
     // Free play (Settings > General), as the operator adjustment playerCost/freeplay.
     set_adjustment("playerCost", "freeplay", app::config().free_play ? 1 : 0);
+    // Both guns enabled (operator adjustments hardware/p1gun, p2gun; 0x4178d0 reads them). Off, a player can't
+    // join: the game shows GUN<n>_DISABLED instead.
+    set_adjustment("hardware", "p1gun", 1);
+    set_adjustment("hardware", "p2gun", 1);
     // Xbox Live "Get Connected" boot screen (Settings > Presentation): the boot flow (0x448c60) shows the
     // online_popup scene until 30 s pass (`cmp ebx, 0x752f` at 0x4493f8) or a cabinet button is pressed. A limit
     // of 0 ends it after one frame.

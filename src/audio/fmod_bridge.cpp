@@ -2,8 +2,10 @@
 // each method here forwards to the matching C API function of a Windows FMOD Studio 1.10 DLL. C++ handles and C
 // handles are the same pointers. Callbacks the game registers are called back through SysV trampolines.
 //
-// The DLL: `fmod_dll` in config.json, else runtime\windows\fmodstudio.dll (or fmodstudio64.dll) next to raven.exe. Unity builds of FMOD 1.10 ship core and
-// studio in one fmodstudio.dll; the FMOD Engine package splits them into fmod64.dll + fmodstudio64.dll (both work).
+// The DLL: `fmod_dll` in config.json, else the FMOD Studio API 1.10.20 DLLs embedded in raven.exe (fmodstudio64.dll
+// + fmod64.dll, unpacked into the runtime folder; tools/fetch_fmod.py), else fmodstudio64.dll / fmodstudio.dll next
+// to raven.exe. Unity builds of FMOD 1.10 ship core and studio in one fmodstudio.dll; the API package splits them
+// into fmod64.dll + fmodstudio64.dll (both work).
 // RAVEN_MUTE=1 selects FMOD's no-sound output (automated test runs).
 #include <windows.h>
 
@@ -34,8 +36,8 @@ bool load() {
     namespace fs = std::filesystem;
     std::vector<fs::path> candidates;
     if (!app::config().fmod_dll.empty()) candidates.push_back(app::to_wide(app::config().fmod_dll));
-    fs::path exe = app::to_wide(app::paths().exe_dir);
-    for (auto dir : {exe / L"runtime" / L"windows", exe}) {
+    fs::path exe = app::to_wide(app::paths().exe_dir), runtime = app::to_wide(app::paths().runtime_dir);
+    for (auto dir : {runtime / L"runtime" / L"windows", exe}) {
         candidates.push_back(dir / L"fmodstudio64.dll");
         candidates.push_back(dir / L"fmodstudio.dll");
     }
@@ -133,7 +135,9 @@ FMOD_SHIM(R, _ZN4FMOD6Studio6System6createEPPS1_j, (void** out, unsigned version
         void* core = nullptr;
         CALL(FMOD_Studio_System_GetLowLevelSystem, (void*, void**), *out, &core);
         g_core_system = core;
-        if (std::getenv("RAVEN_MUTE")) CALL(FMOD_System_SetOutput, (void*, int), core, 2 /*FMOD_OUTPUTTYPE_NOSOUND*/);
+        // RAVEN_WAVWRITER=1 (tests): record the mix to fmodoutput.wav in the working folder instead of playing it.
+        if (std::getenv("RAVEN_WAVWRITER")) CALL(FMOD_System_SetOutput, (void*, int), core, 3 /*FMOD_OUTPUTTYPE_WAVWRITER*/);
+        else if (std::getenv("RAVEN_MUTE")) CALL(FMOD_System_SetOutput, (void*, int), core, 2 /*FMOD_OUTPUTTYPE_NOSOUND*/);
     }
     return r;
 }

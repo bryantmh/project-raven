@@ -11,6 +11,7 @@
 #include <imgui_impl_sdl2.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -18,6 +19,10 @@
 #include "app/config.h"
 #include "app/paths.h"
 #include "gl/gl_bridge.h"
+#include "input/bindings.h"
+#include "game/movie_skip.h"
+#include "input/input.h"
+#include "ui/glyphs.h"
 #include "log.h"
 #include "sdl/sdl_bridge.h"
 
@@ -28,6 +33,60 @@ namespace raven::ui {
 namespace {
 bool g_requested = false, g_open = false, g_inited = false, g_quit = false;
 int g_current_tab = 0, g_tab_step = 0;
+
+// "Press a button" capture for the Controls tab: armed once everything held when it started is released.
+struct Capture {
+    bool active = false, armed = false, pad = false;
+    input::Action action{};
+    int slot = 0;
+    uint64_t started = 0;
+} g_capture;
+// After a capture ends, the button or key that ended it may still be held. ImGui reads controller buttons from their
+// held state, so a slot would see X / Square still down on the next frame and clear the binding just made. Nothing
+// is cleared until everything is released.
+bool g_wait_release = false;
+int g_focus_slot = -1;  // tests (RAVEN_MENU_CAPTURE): the slot id to give keyboard / controller focus
+
+bool anything_held() {
+    if (SDL_GetMouseState(nullptr, nullptr)) return true;
+    int n = 0;
+    const Uint8* keys = SDL_GetKeyboardState(&n);
+    for (int i = 0; i < n; i++)
+        if (keys[i]) return true;
+    for (int j = 0; j < SDL_NumJoysticks(); j++) {
+        SDL_GameController* c = SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(j));
+        if (!c) continue;
+        for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++)
+            if (SDL_GameControllerGetButton(c, SDL_GameControllerButton(b))) return true;
+        if (SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 12000 ||
+            SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 12000)
+            return true;
+    }
+    return false;
+}
+
+// Called for every menu event while capturing; true if the capture took it.
+bool capture_event(const SDL_Event& e) {
+    auto& c = g_capture;
+    bool input_event = e.type == SDL_KEYDOWN || e.type == SDL_KEYUP || e.type == SDL_MOUSEBUTTONDOWN ||
+                       e.type == SDL_MOUSEBUTTONUP || e.type == SDL_CONTROLLERBUTTONDOWN ||
+                       e.type == SDL_CONTROLLERBUTTONUP || e.type == SDL_CONTROLLERAXISMOTION;
+    if (!input_event) return false;
+    if (!c.armed) return true;
+    if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
+        c.active = false;
+        g_wait_release = true;
+        return true;
+    }
+    input::Bind b = input::bind_from_event(e);
+    if (b.kind == input::Bind::None || b.is_pad() != c.pad) return true;
+    input::set_bind(c.action, c.pad, c.slot, b);
+    RLOG("menu: bound %s slot %d to %s", input::action_name(c.action), c.slot + 1, input::bind_label(b).c_str());
+    c.active = false;
+    g_wait_release = true;
+    app::save_config();
+    return true;
+}
 
 template <typename F>
 F gl_fn(const char* name) {
@@ -75,6 +134,7 @@ struct Snapshot {
         bind_fb(0x8CA8, 0);
     }
 } g_snapshot;
+ImFont* g_game_font = nullptr;
 
 void init() {
     if (g_inited) return;
@@ -93,6 +153,12 @@ void init() {
     GetWindowsDirectoryA(windir, MAX_PATH);
     std::string font = std::string(windir) + "\\Fonts\\segoeui.ttf";
     if (!std::filesystem::exists(font) || !io.Fonts->AddFontFromFileTTF(font.c_str(), px)) io.Fonts->AddFontDefault();
+    // Bahnschrift (Windows 10+), close to the game's own bold sans, for prompts drawn over the game.
+    std::string game_font = std::string(windir) + "\\Fonts\\bahnschrift.ttf";
+    ImFontConfig fc;
+    fc.FontDataOwnedByAtlas = true;
+    if (std::filesystem::exists(game_font)) g_game_font = io.Fonts->AddFontFromFileTTF(game_font.c_str(), px * 2.0f, &fc);
+    if (!g_game_font) g_game_font = io.Fonts->Fonts[0];
     ImGui::GetStyle().ScaleAllSizes(px / 16.0f);
     ImGuiStyle& st = ImGui::GetStyle();
     st.WindowRounding = 6;
@@ -100,6 +166,8 @@ void init() {
     st.GrabRounding = 4;
     st.Colors[ImGuiCol_WindowBg] = ImVec4(0.05f, 0.07f, 0.10f, 0.94f);
     ImGui_ImplSDL2_InitForOpenGL(sdl::window(), SDL_GL_GetCurrentContext());
+    // Every connected controller drives the menu (ImGui's default is only the first one).
+    ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_AutoAll);
     ImGui_ImplOpenGL3_Init(nullptr);
 }
 
@@ -194,18 +262,21 @@ void tab_general(app::Config& c) {
     if (ImGui::Button("Change game folder...")) {
         std::string dir = app::pick_folder_dialog();
         if (!dir.empty()) {
-            if (std::filesystem::exists(app::to_wide(dir + "\\halo\\game"))) c.game_folder = dir, g_dirty = true;
+            if (std::filesystem::exists(app::to_wide(dir + "\\halo\\game")) && std::filesystem::is_directory(app::to_wide(dir + "\\dump")))
+                c.game_folder = dir, g_dirty = true;
             else ImGui::OpenPopup("bad_folder");
         }
     }
     restart_note();
     if (ImGui::BeginPopup("bad_folder")) {
-        ImGui::Text("That folder doesn't contain halo\\game.");
+        ImGui::Text("That folder needs both the halo and dump folders.");
         ImGui::EndPopup();
     }
     ImGui::TextDisabled("The game is read from that folder; nothing is copied.");
     ImGui::Separator();
     checkbox("Free play", c.free_play, true);
+    ImGui::Separator();
+    ImGui::TextDisabled("Audio: FMOD Studio by Firelight Technologies Pty Ltd.");
 }
 
 void tab_display(app::Config& c) {
@@ -233,14 +304,100 @@ void tab_display(app::Config& c) {
     if (combo("Frame rate limit", li, limits)) c.fps_limit = values[li];
 }
 
+PadStyle pad_style(const app::Config& c) {
+    // RAVEN_MENU_ICONS=<1|2>: force the icon style (automated screenshots).
+    static const char* force = std::getenv("RAVEN_MENU_ICONS");
+    if (force) return std::atoi(force) == 2 ? PadStyle::PlayStation : PadStyle::Xbox;
+    if (c.button_icons == 1) return PadStyle::Xbox;
+    if (c.button_icons == 2) return PadStyle::PlayStation;
+    return input::controller_is_playstation(0) || (!*input::controller_name(0) && input::controller_is_playstation(1))
+               ? PadStyle::PlayStation
+               : PadStyle::Xbox;
+}
+
+// One binding slot: a button showing the icon; click to rebind, right-click (or the controller's X / Square) to
+// clear.
+void bind_slot(input::Action a, bool pad, int slot, PadStyle style, float w) {
+    using input::Bind;
+    Bind b = pad ? input::pad_bind(a, slot) : input::key_bind(a, slot);
+    float h = ImGui::GetFrameHeight();
+    ImGui::PushID(int(a) * 8 + (pad ? 4 : 0) + slot);
+    bool capturing = g_capture.active && g_capture.action == a && g_capture.pad == pad && g_capture.slot == slot;
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    if (g_focus_slot == int(a) * 8 + (pad ? 4 : 0) + slot) ImGui::SetKeyboardFocusHere(), g_focus_slot = -1;
+    if (ImGui::Button("##slot", ImVec2(w, h * 1.25f))) {
+        g_capture = {true, false, pad, a, slot, SDL_GetTicks64()};
+    }
+    bool clear = ImGui::IsItemClicked(ImGuiMouseButton_Right) ||
+                 (ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false));
+    if (clear && !g_capture.active && !g_wait_release) {
+        input::set_bind(a, pad, slot, Bind{});
+        RLOG("menu: cleared %s slot %d", input::action_name(a), slot + 1);
+        app::save_config();
+    }
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float gh = h * 1.0f, top = pos.y + h * 0.125f;
+    if (capturing) {
+        const char* t = pad ? "Press a button..." : "Press a key...";
+        ImVec2 ts = ImGui::CalcTextSize(t);
+        dl->AddText(ImVec2(pos.x + (w - ts.x) * 0.5f, pos.y + (h * 1.25f - ts.y) * 0.5f), IM_COL32(255, 210, 90, 255), t);
+    } else if (b.kind == Bind::None) {
+        ImVec2 ts = ImGui::CalcTextSize("-");
+        dl->AddText(ImVec2(pos.x + (w - ts.x) * 0.5f, pos.y + (h * 1.25f - ts.y) * 0.5f), IM_COL32(120, 125, 135, 255), "-");
+    } else {
+        // The icon says it all (no words beside it).
+        float gw = glyph_width(b, gh, style);
+        draw_glyph(dl, ImVec2(pos.x + (w - gw) * 0.5f, top), gh, b, style);
+    }
+    ImGui::PopID();
+}
+
 void tab_controls(app::Config& c) {
+    using input::Action;
+    PadStyle style = pad_style(c);
+    // Who plays with what.
+    for (int p = 0; p < 2; p++) {
+        std::string who = p == 0 ? "Keyboard & mouse" : "";
+        const char* pad = input::controller_name(p);
+        if (*pad) who += (who.empty() ? "" : " + ") + std::string(pad);
+        ImGui::Text("Player %d:", p + 1);
+        ImGui::SameLine();
+        if (who.empty()) ImGui::TextDisabled("connect a controller");
+        else ImGui::TextUnformatted(who.c_str());
+    }
+    if (checkbox("Keyboard & mouse is player 1, controllers start at player 2", c.kbm_own_player))
+        input::reassign_controllers();
+    combo("Button icons", c.button_icons, {"Match the controller", "Xbox", "PlayStation"});
     slider("Rumble", c.rumble, 0, 100);
     slider("Aim speed", c.aim_speed, 20, 300);
     slider("Stick deadzone", c.aim_deadzone, 0, 50);
     ImGui::Separator();
-    ImGui::TextDisabled("Controller: right or left stick aim, RT / A fire, LT / B reload,");
-    ImGui::TextDisabled("Y / LB reload (point off-screen), RB / X grenade, Start join, Select menu.");
-    ImGui::TextDisabled("Mouse: aim, left fire, right reload, middle grenade. Keys: 1/2 start, R reload.");
+    ImGui::TextDisabled("Both sticks aim. Click a slot and press the new button (Esc cancels);");
+    ImGui::TextDisabled("right-click or X / Square clears it. All controllers share these buttons.");
+    float slot_w = std::max(ImGui::GetFrameHeight() * 4.6f, ImGui::CalcTextSize("Press a button...").x + 20);
+    if (ImGui::BeginTable("binds", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX)) {
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Controller", ImGuiTableColumnFlags_WidthFixed, slot_w);
+        ImGui::TableSetupColumn("##pad2", ImGuiTableColumnFlags_WidthFixed, slot_w);
+        ImGui::TableSetupColumn("Keyboard & mouse", ImGuiTableColumnFlags_WidthFixed, slot_w);
+        ImGui::TableSetupColumn("##key2", ImGuiTableColumnFlags_WidthFixed, slot_w);
+        ImGui::TableHeadersRow();
+        for (int i = 0; i < input::kActionCount; i++) {
+            auto a = Action(i);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(input::action_name(a));
+            for (int col = 0; col < 4; col++) {
+                ImGui::TableNextColumn();
+                bind_slot(a, col < 2, col % 2, style, slot_w);
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Reset controls to defaults")) input::reset_binds(), app::save_config();
+    ImGui::SameLine();
+    ImGui::TextDisabled("Fixed: 5 coin, F2 operator test, F3 service.");
 }
 
 void tab_presentation(app::Config& c) {
@@ -249,6 +406,9 @@ void tab_presentation(app::Config& c) {
     checkbox("Skip the Xbox Live \"Get Connected\" screen", c.skip_xbox_screen, true);
     checkbox("Hide QR scanner notices", c.hide_qr_notices, true);
     checkbox("Boot image instead of boot text", c.boot_image, true);
+    checkbox("Start skips mission movies (instead of Reload)", c.start_skips_movies, true);
+    checkbox("Mission movies fill wide screens", c.movies_fill);
+    checkbox("Hide player 2's \"JOIN NOW / Press START\" panel", c.hide_p2_join, true);
 }
 
 void draw_menu(int w, int h) {
@@ -257,7 +417,7 @@ void draw_menu(int w, int h) {
     ImVec2 disp = ImGui::GetIO().DisplaySize;
     float scale = std::max(0.75f, disp.y / 1080.0f) * (float(h) / std::max(1.0f, disp.y)) / std::max(0.01f, ImGui::GetIO().DisplayFramebufferScale.y);
     ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(std::min(1250 * scale, disp.x - 20), std::min(760 * scale, disp.y - 20)), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(std::min(1250 * scale, disp.x - 20), std::min(1000 * scale, disp.y * 0.94f)), ImGuiCond_Always);
     ImGui::Begin("Project Raven", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
     // RAVEN_MENU_TAB=<0-3>: start on that tab (automated screenshots).
     static int first_tab = [] { const char* t = std::getenv("RAVEN_MENU_TAB"); return t ? std::atoi(t) : -1; }();
@@ -269,10 +429,23 @@ void draw_menu(int w, int h) {
     }
     auto flags = [&](int i) { return first_tab == i ? ImGuiTabItemFlags_SetSelected : 0; };
     if (ImGui::BeginTabBar("tabs")) {
-        if (ImGui::BeginTabItem("General", nullptr, flags(0))) g_current_tab = 0, tab_general(c), ImGui::EndTabItem();
-        if (ImGui::BeginTabItem("Display", nullptr, flags(1))) g_current_tab = 1, tab_display(c), ImGui::EndTabItem();
-        if (ImGui::BeginTabItem("Controls", nullptr, flags(2))) g_current_tab = 2, tab_controls(c), ImGui::EndTabItem();
-        if (ImGui::BeginTabItem("Presentation", nullptr, flags(3))) g_current_tab = 3, tab_presentation(c), ImGui::EndTabItem();
+        // Each tab scrolls in the space above the Resume / Quit row.
+        float footer = ImGui::GetFrameHeightWithSpacing() * 1.6f;
+        auto tab = [&](const char* name, int i, void (*body)(app::Config&)) {
+            if (!ImGui::BeginTabItem(name, nullptr, flags(i))) return;
+            g_current_tab = i;
+            ImGui::BeginChild("content", ImVec2(0, -footer), ImGuiChildFlags_None, ImGuiWindowFlags_NavFlattened);
+            body(c);
+            // RAVEN_MENU_SCROLL=<0..1>: scroll the tab that far down (automated screenshots).
+            static const char* scroll = std::getenv("RAVEN_MENU_SCROLL");
+            if (scroll) ImGui::SetScrollY(ImGui::GetScrollMaxY() * float(std::atof(scroll)));
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        };
+        tab("General", 0, tab_general);
+        tab("Display", 1, tab_display);
+        tab("Controls", 2, tab_controls);
+        tab("Presentation", 3, tab_presentation);
         first_tab = -1;
         ImGui::EndTabBar();
     }
@@ -282,7 +455,10 @@ void draw_menu(int w, int h) {
     ImGui::SameLine();
     if (ImGui::Button("Quit game")) g_quit = true;
     ImGui::SameLine();
-    ImGui::TextDisabled("  L1/R1 or Q/E: tabs.  (restart): applies the next time the game starts");
+    ImGui::TextDisabled("  (restart): applies the next time the game starts");
+    if (g_capture.active && !g_capture.armed && !anything_held()) g_capture.armed = true;
+    if (g_capture.active && SDL_GetTicks64() - g_capture.started > 8000) g_capture.active = false, g_wait_release = true;
+    if (g_wait_release && !g_capture.active && !anything_held()) g_wait_release = false;
     ImGui::End();
     if (g_dirty) {
         app::save_config();
@@ -290,9 +466,15 @@ void draw_menu(int w, int h) {
     }
 }
 
+// The Settings menu binding (Select / F1 by default). With nothing bound on a device, its default still works there.
 bool is_toggle(const SDL_Event& e) {
-    return (e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK) ||
-           (e.type == SDL_KEYDOWN && !e.key.repeat && e.key.keysym.scancode == SDL_SCANCODE_F1);
+    using input::Action;
+    using input::Bind;
+    if (input::event_presses(e, Action::Menu)) return true;
+    bool pad_empty = input::pad_bind(Action::Menu, 0).kind == Bind::None && input::pad_bind(Action::Menu, 1).kind == Bind::None;
+    bool key_empty = input::key_bind(Action::Menu, 0).kind == Bind::None && input::key_bind(Action::Menu, 1).kind == Bind::None;
+    return (pad_empty && e.type == SDL_CONTROLLERBUTTONDOWN && e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK) ||
+           (key_empty && e.type == SDL_KEYDOWN && !e.key.repeat && e.key.keysym.scancode == SDL_SCANCODE_F1);
 }
 
 void run() {
@@ -305,6 +487,15 @@ void run() {
     audio::set_paused(true);
     SDL_ShowCursor(SDL_ENABLE);
     RLOG("menu: open");
+    // Automated test runs (RAVEN_HEADLESS) never read the user's real controllers: only the script's virtual ones
+    // drive the menu.
+    if (std::getenv("RAVEN_HEADLESS")) {
+        std::vector<SDL_GameController*> pads;
+        for (int i = 0; i < SDL_NumJoysticks(); i++)
+            if (SDL_JoystickIsVirtual(i) && SDL_IsGameController(i))
+                if (SDL_GameController* c = SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i))) pads.push_back(c);
+        ImGui_ImplSDL2_SetGamepadMode(ImGui_ImplSDL2_GamepadMode_Manual, pads.data(), int(pads.size()));
+    }
     g_open = true;
     auto clear = gl_fn<void(__stdcall*)(unsigned)>("glClear");
     auto disable = gl_fn<void(__stdcall*)(unsigned)>("glDisable");
@@ -315,7 +506,11 @@ void run() {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) g_quit = true;
-            if (is_toggle(e) || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) g_open = false;
+            if (g_capture.active) {
+                if (capture_event(e)) continue;
+            } else if (is_toggle(e) || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) {
+                g_open = false;
+            }
             if (e.type == SDL_CONTROLLERBUTTONDOWN) {
                 if (e.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) g_tab_step = -1;
                 if (e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) g_tab_step = 1;
@@ -330,7 +525,55 @@ void run() {
             }
             ImGui_ImplSDL2_ProcessEvent(&e);
         }
+        // RAVEN_MENU_PRESS=<seconds>:<button>: hold that button on virtual controller 0 for 0.5 s, that long after
+        // the menu opens (tests, e.g. clearing a focused slot with X).
+        static const char* press = std::getenv("RAVEN_MENU_PRESS");
+        static int press_step = 0;
+        if (press && press_step < 2) {
+            double at = 0;
+            int button = 0;
+            std::sscanf(press, "%lf:%d", &at, &button);
+            uint64_t t = SDL_GetTicks64() - opened;
+            if (press_step == 0 && t > uint64_t(at * 1000) && input::set_virtual_button(0, button, true)) press_step = 1;
+            else if (press_step == 1 && t > uint64_t(at * 1000) + 500) input::set_virtual_button(0, button, false), press_step = 2;
+        }
         if (auto_close && SDL_GetTicks64() - opened > uint64_t(std::atof(auto_close) * 1000)) g_open = false;
+        // RAVEN_MENU_CAPTURE=<action>:<pad 0|1>:<slot>:<code>: 1 s after opening, focus that slot and start a capture
+        // on it (as pressing A on it does); 1 s later press <code> (a scancode, or a controller button). With a
+        // virtual controller attached (test script "pad:0") the button is held on it for 0.5 s, like a real press;
+        // otherwise a press and release are sent as events.
+        static const char* cap = std::getenv("RAVEN_MENU_CAPTURE");
+        static int cap_step = 0;
+        if (cap && cap_step < 3) {
+            int a = 0, pad = 0, slot = 0, code = 0;
+            std::sscanf(cap, "%d:%d:%d:%d", &a, &pad, &slot, &code);
+            uint64_t t = SDL_GetTicks64() - opened;
+            if (cap_step == 0 && t > 1000) {
+                g_focus_slot = a * 8 + (pad ? 4 : 0) + slot;
+                g_capture = {true, false, pad != 0, input::Action(a), slot, SDL_GetTicks64()};
+                cap_step = 1;
+            } else if (cap_step == 1 && t > 2000 && pad && input::set_virtual_button(0, code, true)) {
+                cap_step = 2;
+            } else if (cap_step == 2 && t > 2500) {
+                input::set_virtual_button(0, code, false);
+                cap_step = 3;
+            } else if (cap_step == 1 && t > 2000) {
+                for (bool down : {true, false}) {
+                    SDL_Event ev{};
+                    if (pad) {
+                        ev.type = down ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;
+                        ev.cbutton.button = uint8_t(code);
+                        ev.cbutton.state = down ? SDL_PRESSED : SDL_RELEASED;
+                    } else {
+                        ev.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+                        ev.key.keysym.scancode = SDL_Scancode(code);
+                        ev.key.state = down ? SDL_PRESSED : SDL_RELEASED;
+                    }
+                    SDL_PushEvent(&ev);
+                }
+                cap_step = 3;
+            }
+        }
         SDL_GL_GetDrawableSize(sdl::window(), &w, &h);
         disable(0x0C11);
         g_snapshot.draw(w, h);
@@ -369,7 +612,62 @@ bool on_event(const SDL_Event& e) {
     return false;
 }
 
+// "Press <Start> to skip" over a mission movie (src/game/movie_skip.cpp), where the game's "Press RELOAD to skip"
+// was: top center, light gray. The icon is the Start binding of the controller in use, else the keyboard's.
+void draw_skip_prompt() {
+    init();
+    int w = 0, h = 0;
+    SDL_GL_GetDrawableSize(sdl::window(), &w, &h);
+    GlState saved;
+    saved.save();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;  // the game hides the cursor; keep it that way
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplSDL2_NewFrame();
+    ImGui::NewFrame();
+    using input::Bind;
+    bool pad = *input::controller_name(0) || *input::controller_name(1);
+    Bind b = pad ? input::pad_bind(input::Action::Start, 0) : Bind{};
+    if (pad && b.kind == Bind::None) b = input::pad_bind(input::Action::Start, 1);
+    if (b.kind == Bind::None) {
+        pad = false;
+        b = input::key_bind(input::Action::Start, 0);
+        if (b.kind == Bind::None) b = input::key_bind(input::Action::Start, 1);
+    }
+    PadStyle style = input::controller_is_playstation(0) || (!*input::controller_name(0) && input::controller_is_playstation(1))
+                         ? PadStyle::PlayStation
+                         : PadStyle::Xbox;
+    // Sizes in ImGui display units (the window), from the game's prompt: text ~5% of the height, centered 3.6% down.
+    ImVec2 disp = io.DisplaySize;
+    float size = disp.y * 0.066f, glyph_h = size * 0.85f;
+    ImFont* f = g_game_font;
+    const char* left = "Press ";
+    const char* right = " to skip";
+    float lw = f->CalcTextSizeA(size, FLT_MAX, 0, left).x, rw = f->CalcTextSizeA(size, FLT_MAX, 0, right).x;
+    float gw = b.kind == Bind::None ? 0 : glyph_width(b, glyph_h, style) + size * 0.1f;
+    float x = disp.x * 0.5f - (lw + gw + rw) * 0.5f, cy = disp.y * 0.036f;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImU32 text = IM_COL32(218, 220, 224, 255), shadow = IM_COL32(0, 0, 0, 160);
+    auto put = [&](float at, const char* t) {
+        ImVec2 p(at, cy - size * 0.5f);
+        dl->AddText(f, size, ImVec2(p.x + size * 0.05f, p.y + size * 0.05f), shadow, t);
+        for (float dx : {0.0f, size * 0.025f}) dl->AddText(f, size, ImVec2(p.x + dx, p.y), text, t);  // bolder
+    };
+    put(x, left);
+    if (gw > 0) draw_glyph(dl, ImVec2(x + lw + size * 0.05f, cy - glyph_h * 0.5f), glyph_h, b, style);
+    put(x + lw + gw, right);
+    ImGui::Render();
+    auto bind_fb = gl_fn<void(__stdcall*)(unsigned, unsigned)>("glBindFramebuffer");
+    auto viewport = gl_fn<void(__stdcall*)(int, int, int, int)>("glViewport");
+    bind_fb(0x8D40, 0);
+    viewport(0, 0, w, h);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
+    saved.restore();
+}
+
 void before_present() {
+    if (game::movie_skip_prompt() && !g_open) draw_skip_prompt();
     static bool auto_open_done = false;
     // RAVEN_MENU_AT=<seconds>: open the menu by itself once (automated screenshots).
     static const char* auto_open = std::getenv("RAVEN_MENU_AT");

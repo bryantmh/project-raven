@@ -32,6 +32,8 @@ struct Edit {
     const char* replace;
     bool app::Config::*enabled;
 };
+// Ends a script's program as soon as it starts (event handlers can't bring it back, unlike HIDE_FOREVER).
+#define KILL_AT_START "#-EndHeader\nKILLPRIME        "
 // Hides a script's object for good: HIDE, then sleep forever.
 #define HIDE_FOREVER "#-EndHeader\nHIDE             \nSLEEP            0"
 const Edit kEdits[] = {
@@ -57,6 +59,15 @@ const Edit kEdits[] = {
     // there is no countdown and no timeout.
     {"gamesel_time.txt", "UI_TIMER_START   30,0", "KILLPRIME        ", &app::Config::no_menu_countdown},
     {"gamesel_time_r.txt", "UI_TIMER_START   30,0", "KILLPRIME        ", &app::Config::no_menu_countdown},
+    // Mission movies: "Press RELOAD to skip" (a texture); Project Raven draws "Press <Start icon> to skip" instead
+    // (src/game/movie_skip.cpp).
+    {"intro_movie/skip_text.txt", "#-EndHeader", HIDE_FOREVER, &app::Config::start_skips_movies},
+    // Player 2's "JOIN NOW / Press START" panel (slot 4 in the scripts) with Ava Lang's plaque and join movie, which
+    // stays on screen while nobody plays player 2. Display only: joining is handled in code (0x4269e0).
+    {"moneyin_game/CashPlay_P4_Msg.txt", "#-EndHeader", KILL_AT_START, &app::Config::hide_p2_join},
+    {"moneyin_game/join_plaq_p4.txt", "#-EndHeader", KILL_AT_START, &app::Config::hide_p2_join},
+    {"moneyin_game/join_in_p4_movie.txt", "#-EndHeader", KILL_AT_START, &app::Config::hide_p2_join},
+    {"moneyin_game/NoStart_P4_Msg.txt", "#-EndHeader", KILL_AT_START, &app::Config::hide_p2_join},
 };
 
 bool ends_with(const char* s, const char* suffix) {

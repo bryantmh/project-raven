@@ -5,11 +5,13 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
 
 #include "linux/shim.h"
+#include "game/ui_aspect.h"
 #include "log.h"
 
 #include "gl/gl_thunks.inc"
@@ -90,10 +92,84 @@ using BindTex = void(__stdcall*)(unsigned, unsigned);
 using ActiveTex = void(__stdcall*)(unsigned);
 BindTex d_bind_tex;
 ActiveTex d_active_tex;
-unsigned g_active_unit = 0, g_tex0 = 0;
+unsigned g_active_unit = 0, g_tex0 = 0, g_bound2d[32] = {};
 void __stdcall w_bind_tex(unsigned target, unsigned tex) {
+    if (target == 0x0DE1 && g_active_unit < 32) g_bound2d[g_active_unit] = tex;
     if (g_active_unit == 0 && target == 0x0DE1) g_tex0 = tex;
     d_bind_tex(target, tex);
+}
+
+// Movie frames: a video texture is a large one whose pixels are uploaded over and over (once per movie frame).
+std::unordered_map<unsigned, int> g_uploads;
+void note_upload(unsigned target, int w, int h) {
+    if (target != 0x0DE1 || w < 640 || h < 360 || g_active_unit >= 32) return;
+    int& n = g_uploads[g_bound2d[g_active_unit]];
+    if (n < 1000000) n++;
+    static bool debug = std::getenv("RAVEN_BIGDEBUG") != nullptr;
+    if (debug && (n == 1 || n == 24 || n % 600 == 0))
+        RLOG("bigdebug: upload #%d to texture %u (unit %u) %dx%d", n, g_bound2d[g_active_unit], g_active_unit, w, h);
+}
+// Movies (mission intros / outros) are 16:9 frames with the film (about 2.21:1, 1920x867) letterboxed inside, and
+// the game fits the frame to the screen height, so wide screens get bars on all four sides. With "Movies fill wide
+// screens" a draw that samples a movie texture on unit 0 gets a viewport g_movie_scale times larger around the
+// screen center: the whole quad grows uniformly, the film fills the width, and on screens wider than 2.21:1 a
+// little of its top and bottom is cut.
+float g_movie_scale = 1.0f;
+using GetIntv = void(__stdcall*)(unsigned, int*);
+using Viewport = void(__stdcall*)(int, int, int, int);
+template <typename F>
+void draw_movie_scaled(F draw) {
+    if (g_movie_scale <= 1.001f || !is_video_texture(g_tex0)) return draw();
+    static auto get = reinterpret_cast<GetIntv>(real("glGetIntegerv"));
+    static auto viewport = reinterpret_cast<Viewport>(real("glViewport"));
+    int vp[4] = {};
+    get(0x0BA2, vp);
+    if (vp[2] != g_fbo_w || vp[3] != g_fbo_h) return draw();  // only the full frame
+    static bool logged = false;
+    if (!logged) RLOG("movie: frame scaled %.3fx to fill the width (texture %u)", g_movie_scale, g_tex0), logged = true;
+    float w = float(vp[2]) * g_movie_scale, h = float(vp[3]) * g_movie_scale;
+    viewport(vp[0] + int((float(vp[2]) - w) * 0.5f), vp[1] + int((float(vp[3]) - h) * 0.5f), int(w), int(h));
+    draw();
+    viewport(vp[0], vp[1], vp[2], vp[3]);
+}
+using DrawArrays = void(__stdcall*)(unsigned, int, int);
+using DrawElements = void(__stdcall*)(unsigned, int, unsigned, const void*);
+using DrawRangeElements = void(__stdcall*)(unsigned, unsigned, unsigned, int, unsigned, const void*);
+DrawArrays d_draw_arrays;
+DrawElements d_draw_elements;
+DrawRangeElements d_draw_range_elements;
+void __stdcall w_draw_arrays(unsigned mode, int first, int count) {
+    game::ui_before_draw(first, count, 0, nullptr);
+    draw_movie_scaled([&] { d_draw_arrays(mode, first, count); });
+    game::ui_after_draw();
+}
+void __stdcall w_draw_elements(unsigned mode, int count, unsigned type, const void* idx) {
+    game::ui_before_draw(0, count, type, idx);
+    draw_movie_scaled([&] { d_draw_elements(mode, count, type, idx); });
+    game::ui_after_draw();
+}
+void __stdcall w_draw_range_elements(unsigned mode, unsigned lo, unsigned hi, int count, unsigned type, const void* idx) {
+    game::ui_before_draw(0, count, type, idx);
+    draw_movie_scaled([&] { d_draw_range_elements(mode, lo, hi, count, type, idx); });
+    game::ui_after_draw();
+}
+using DeleteTextures = void(__stdcall*)(int, const unsigned*);
+DeleteTextures d_delete_textures;
+void __stdcall w_delete_textures(int n, const unsigned* ids) {
+    for (int i = 0; i < n && ids; i++) g_uploads.erase(ids[i]);  // a reused name is a new texture
+    d_delete_textures(n, ids);
+}
+using TexSubImage2D = void(__stdcall*)(unsigned, int, int, int, int, int, unsigned, unsigned, const void*);
+using TexImage2D = void(__stdcall*)(unsigned, int, int, int, int, int, unsigned, unsigned, const void*);
+TexSubImage2D d_tex_sub_image;
+TexImage2D d_tex_image;
+void __stdcall w_tex_sub_image(unsigned t, int level, int x, int y, int w, int h, unsigned f, unsigned ty, const void* p) {
+    if (level == 0) note_upload(t, w, h);
+    d_tex_sub_image(t, level, x, y, w, h, f, ty, p);
+}
+void __stdcall w_tex_image(unsigned t, int level, int ifmt, int w, int h, int b, unsigned f, unsigned ty, const void* p) {
+    if (level == 0 && p) note_upload(t, w, h);
+    d_tex_image(t, level, ifmt, w, h, b, f, ty, p);
 }
 void __stdcall w_active_tex(unsigned unit) {
     g_active_unit = unit - 0x84C0;
@@ -177,12 +253,25 @@ void create_game_framebuffer(int w, int h) {
     patch("glDrawBuffers", reinterpret_cast<void*>(&w_draw_buffers), reinterpret_cast<void**>(&d_draw_buffers));
     patch("glBindTexture", reinterpret_cast<void*>(&w_bind_tex), reinterpret_cast<void**>(&d_bind_tex));
     patch("glActiveTexture", reinterpret_cast<void*>(&w_active_tex), reinterpret_cast<void**>(&d_active_tex));
+    patch("glTexSubImage2D", reinterpret_cast<void*>(&w_tex_sub_image), reinterpret_cast<void**>(&d_tex_sub_image));
+    patch("glTexImage2D", reinterpret_cast<void*>(&w_tex_image), reinterpret_cast<void**>(&d_tex_image));
+    patch("glDeleteTextures", reinterpret_cast<void*>(&w_delete_textures), reinterpret_cast<void**>(&d_delete_textures));
+    patch("glDrawArrays", reinterpret_cast<void*>(&w_draw_arrays), reinterpret_cast<void**>(&d_draw_arrays));
+    patch("glDrawElements", reinterpret_cast<void*>(&w_draw_elements), reinterpret_cast<void**>(&d_draw_elements));
+    patch("glDrawRangeElements", reinterpret_cast<void*>(&w_draw_range_elements), reinterpret_cast<void**>(&d_draw_range_elements));
     d_draw_buffer(kColor0);
     d_read_buffer(kColor0);
     RLOG("GL: game renders to a %dx%d framebuffer, scaled into the window", w, h);
 }
 
 unsigned bound_texture0() { return g_tex0; }
+
+void set_movie_scale(float k) { g_movie_scale = k; }
+
+bool is_video_texture(unsigned tex) {
+    auto it = g_uploads.find(tex);
+    return tex && it != g_uploads.end() && it->second >= 24;
+}
 
 void set_view_aspect(float aspect) { g_view_aspect = aspect; }
 

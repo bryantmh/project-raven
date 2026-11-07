@@ -74,7 +74,7 @@ bool ensure_texture() {
     static bool tried = false;
     if (tried) return g_fbo != 0;
     tried = true;
-    auto path = std::filesystem::path(app::to_wide(app::paths().exe_dir)) / L"assets" / L"boot.jpg";
+    auto path = std::filesystem::path(app::to_wide(app::paths().runtime_dir)) / L"assets" / L"boot.jpg";
     Image img = load_image(path.wstring());
     if (!img.w) return false;
     std::vector<uint8_t> flipped(img.bgra.size());  // GL wants bottom-up rows

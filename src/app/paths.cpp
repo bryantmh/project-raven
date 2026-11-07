@@ -32,10 +32,18 @@ void set_game_dir(const std::string& dir) {
     g_paths.game_halo_dir = to_utf8((p / L"halo").wstring());
 }
 
+void set_runtime_dir(const std::string& dir) { g_paths.runtime_dir = dir; }
+
 void init_paths() {
     wchar_t buf[MAX_PATH];
     GetModuleFileNameW(nullptr, buf, MAX_PATH);
     g_paths.exe_dir = to_utf8(std::filesystem::path(buf).parent_path().wstring());
+    // RAVEN_SAVE_DIR: settings and log somewhere else (automated runs, so they never touch the real config).
+    if (const wchar_t* dir = _wgetenv(L"RAVEN_SAVE_DIR")) {
+        std::filesystem::create_directories(dir);
+        g_paths.save_dir = to_utf8(dir);
+        return;
+    }
     PWSTR appdata = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appdata))) {
         auto dir = std::filesystem::path(appdata) / L"ProjectRaven";

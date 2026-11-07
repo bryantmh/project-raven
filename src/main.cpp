@@ -9,6 +9,8 @@
 
 #include "app/config.h"
 #include "app/paths.h"
+#include "app/runtime_pack.h"
+#include "input/bindings.h"
 #include "elf/elf_loader.h"
 #include "game/boot.h"
 #include "game/patches.h"
@@ -53,11 +55,14 @@ std::string pick_folder() {
     return out;
 }
 
+// The game folder holds halo\ (the game) and dump\ (the cabinet's data files, read at boot as /pm/g7/dump; without
+// them the game crashes while setting up its tables).
 bool game_folder_ok(const std::string& dir) {
     namespace fs = std::filesystem;
     if (dir.empty()) return false;
     app::set_game_dir(dir);
-    return fs::exists(app::to_wide(app::paths().game_halo_dir + "\\game"));
+    return fs::exists(app::to_wide(app::paths().game_halo_dir + "\\game")) &&
+           fs::is_directory(app::to_wide(app::paths().game_dir + "\\dump"));
 }
 
 elf::Image* g_game = nullptr;
@@ -132,13 +137,16 @@ int main(int argc, char** argv) {
     log_init((app::paths().save_dir + "\\raven.log").c_str());
     RLOG("Project Raven starting; save folder %s", app::paths().save_dir.c_str());
     if (!g_reserve.p) log_fatal("The game's memory range (0x400000-0x2400000) is already in use.");
+    if (!app::unpack_runtime()) log_fatal("Project Raven couldn't unpack its runtime files into %%LOCALAPPDATA%%\\ProjectRaven.");
 
     app::load_config();
+    input::load_binds();
     for (int i = 1; i + 1 < argc; i++)
         if (std::string(argv[i]) == "--game") app::config().game_folder = argv[++i];
     if (!game_folder_ok(app::config().game_folder)) {
         std::string dir = pick_folder();
-        if (!game_folder_ok(dir)) log_fatal("That folder doesn't contain halo\\game. Select the Halo: Fireteam Raven folder.");
+        if (!game_folder_ok(dir))
+            log_fatal("Select the Halo: Fireteam Raven folder: the one that contains both the halo and dump folders.");
         app::config().game_folder = app::paths().game_dir;
     }
     app::save_config();
@@ -148,8 +156,8 @@ int main(int argc, char** argv) {
     const auto& P = app::paths();
     g_game = elf::load(P.game_halo_dir + "\\game", "game", true);
     elf::Image* halo_so = elf::load(P.game_halo_dir + "\\halo.so", "halo.so", false);
-    elf::Image* libstdcxx = elf::load(P.exe_dir + "\\runtime\\linux\\libstdc++.so.6", "libstdc++.so.6", false);
-    elf::Image* libgcc = elf::load(P.exe_dir + "\\runtime\\linux\\libgcc_s.so.1", "libgcc_s.so.1", false);
+    elf::Image* libstdcxx = elf::load(P.runtime_dir + "\\runtime\\linux\\libstdc++.so.6", "libstdc++.so.6", false);
+    elf::Image* libgcc = elf::load(P.runtime_dir + "\\runtime\\linux\\libgcc_s.so.1", "libgcc_s.so.1", false);
 
     elf::link_all();
     game::bind_embedded_imports(*g_game);

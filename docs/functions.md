@@ -94,5 +94,14 @@ Script commands are a table of 0x80-byte records (handler at name-0x14, id at na
 | `0x618ea0` | pmrt_io update | polls SDL events: keys become physical scancode switches, mouse motion goes to analog channels at `[0x180adf0]+0x6000` (X) / `+0x6048` (Y), mouse buttons count presses, SDL game controller events (0x650-0x652) feed its own joystick support |
 | `0x61cdc0` | `AnalogSet(channel, value)` | 0x48-byte channel: value `+4`, raw `+0xc`, flags `+0` (bit 0 = invert as 1 - v), offset `+0x3c`, scale `+0x44` |
 | `0x4acdb0` | `IoRemapAdd(physical, logical)` | table count `0x1771850`, entries `0x1766f40 + 0x1122*8` |
-| `0x41baf0` | remap builder | mouse mode (`0x1749fa9`, read by `0x438020`) maps physical `0x201/0x202` to every gun's X/Y (logical `0x206+12k/0x207+12k`) |
+| `0x41baf0` | remap builder | mouse mode (`0x1749fa9`, read by `0x438020`) maps physical `0x201/0x202` to every gun's X/Y (logical `0x206+12k/0x207+12k`) and second pair (`0x2a3+3k/0x2a4+3k`); triggers from mouse buttons `0x204-0x206` (gun 0) and keys Q/W/E, R/T/Y, U/I/O (guns 1-3) |
+| `0x4ace10` | `IoRemapRemove(physical, logical)` | removes one entry (the last entry moves into its slot) |
+| `0x4acfe0` | `IoRemapSource(logical)` | the physical mapped to a logical, or -1; game code skips a gun whose axes have none |
+| `0x4ad6e8` | remap copy (in `0x4ad370`) | every frame, for each remap: copies the physical analog channel (`0x61ee70`) over the logical one (`0x4ac220`) |
+| `0x4ae030` | `IoChannel(id)` | logical / physical analog channel pointer (jump table `0x1147cb0`, ids `0x200-0x2f2`); `0x4af0a0` reads its value |
+| `0x61ee70` | `DriverAnalog(physical)` | PC driver analog channel: `0x201-0x203` mouse X/Y/wheel, `0x21d-0x220`, `0x239-0x298` joystick axes; 32-bit offset table at `0x11bcd70` (from itself) for `0x201-0x3c5`. Project Raven points `0x210/0x211` at player 2's channels |
+| `0x4269e0` | player join loop | per slot 0-3: start switch `0x24e+slot`, `MARK_PLAYER_JOIN`; on this cabinet type slots 1 and 2 are skipped (2 players = slots 0 and 3) |
+| `0x4178d0` | `GunEnabled(slot)` | adjustment `hardware/p<n>gun` (slot 3 reads `p2gun` on this cabinet type) |
+| `0x494fa0` | `SceneStart(scene, flag)` | scene name at `+0`; `0x4957d0` ends one |
+| `0x4ab530` | `SetTrigger(domain, name)` | looks the trigger up in the hash table `0x1c1fac0` (`0x922160(table, name, 0)`), sets it and counts sets at `+0xb8` |
 | `0x438010` | `-random` flag | `0x1749fbf` |

@@ -39,8 +39,9 @@ bool is_screen_aspect(float a) {
 // attract_2d / game_select2 / chaptersel are the menus. Scenes are rarely ended, so the last main one started wins.
 using SceneFn = SYSV void (*)(char*, int);
 SceneFn g_scene_start = nullptr;
-bool g_in_level = false;
+bool g_in_level = false, g_scenes_started = false;
 SYSV void h_scene_start(char* scene, int arg) {
+    g_scenes_started = true;
     if (scene) {
         static bool debug = std::getenv("RAVEN_SCENEDEBUG") != nullptr;
         if (debug) RLOG("scene: start %s (%d)", scene, arg);
@@ -79,6 +80,7 @@ SYSV void h_camera_update(uint8_t* cam, int arg) {
 }  // namespace
 
 bool in_mission() { return g_in_level; }
+bool scenes_started() { return g_scenes_started; }
 
 void install_view_aspect() {
     // push r12; push rbp; mov r12d, esi; push rbx; mov rbx, rdi; sub rsp, 0x10 (14 bytes, position-independent)

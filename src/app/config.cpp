@@ -1,6 +1,7 @@
 #include "app/config.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -79,9 +80,14 @@ const Field kFields[] = {
     {"skip_xbox_screen", nullptr, &Config::skip_xbox_screen},
     {"hide_qr_notices", nullptr, &Config::hide_qr_notices},
     {"boot_image", nullptr, &Config::boot_image},
+    {"start_skips_movies", nullptr, &Config::start_skips_movies},
+    {"movies_fill", nullptr, &Config::movies_fill},
+    {"hide_p2_join", nullptr, &Config::hide_p2_join},
     {"rumble", nullptr, nullptr, &Config::rumble},
     {"aim_speed", nullptr, nullptr, &Config::aim_speed},
     {"aim_deadzone", nullptr, nullptr, &Config::aim_deadzone},
+    {"kbm_own_player", nullptr, &Config::kbm_own_player},
+    {"button_icons", nullptr, nullptr, &Config::button_icons},
 };
 }  // namespace
 
@@ -101,6 +107,8 @@ void load_config() {
         else if (fd.b) g_config.*fd.b = it->second == "true";
         else if (fd.i) g_config.*fd.i = std::atoi(it->second.c_str());
     }
+    for (auto& [k, v] : kv)
+        if (k.rfind("pad_", 0) == 0 || k.rfind("key_", 0) == 0) g_config.binds[k] = v;
     // Migrations. 1 -> 2: presentation/display settings added (defaults apply). 2 -> 3: the UI layout default
     // changed from stretched to corners (version 2 only offered stretched as the safe choice).
     if (file_version < 3) g_config.ui_layout = 2;
@@ -108,6 +116,16 @@ void load_config() {
     if (file_version < 4) g_config.display_mode = kv["fullscreen"] == "true" ? 1 : 0;
     if (file_version < 4) RLOG("config: migrated version %d -> 4", file_version);
     g_config.version = 4;
+    // RAVEN_TEST_RES=<w>x<h>: automated runs play windowed at this size and resolution (lighter on the machine).
+    if (const char* r = std::getenv("RAVEN_TEST_RES")) {
+        int w = 0, h = 0;
+        if (std::sscanf(r, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+            g_config.display_mode = 0;
+            g_config.window_width = g_config.render_width = w;
+            g_config.window_height = g_config.render_height = h;
+            RLOG("config: test resolution %dx%d, windowed", w, h);
+        }
+    }
 }
 
 void save_config() {
@@ -119,8 +137,11 @@ void save_config() {
         if (fd.s) f << '"' << escape(g_config.*fd.s) << '"';
         else if (fd.b) f << (g_config.*fd.b ? "true" : "false");
         else f << g_config.*fd.i;
-        f << (n + 1 < std::size(kFields) ? ",\n" : "\n");
+        f << (n + 1 < std::size(kFields) || !g_config.binds.empty() ? ",\n" : "\n");
     }
+    size_t m = 0;
+    for (auto& [k, v] : g_config.binds)
+        f << "  \"" << escape(k) << "\": \"" << escape(v) << '"' << (++m < g_config.binds.size() ? ",\n" : "\n");
     f << "}\n";
 }
 }  // namespace raven::app

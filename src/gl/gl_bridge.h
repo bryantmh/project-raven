@@ -22,6 +22,10 @@ void rebind_game_framebuffer();
 void game_rect_in(int win_w, int win_h, int* x, int* y, int* w, int* h);
 // The 2D texture the game last bound on texture unit 0.
 unsigned bound_texture0();
+// True for a texture whose (large) pixels have been uploaded many times: a movie's frame texture.
+bool is_video_texture(unsigned tex);
+// Movies are drawn this many times larger around the screen center (1 = as the game draws them).
+void set_movie_scale(float k);
 // The SysV thunk for a GL command, or null if the driver lacks it.
 void* thunk_for(const char* name);
 }  // namespace raven::gl

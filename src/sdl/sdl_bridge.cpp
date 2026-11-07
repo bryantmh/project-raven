@@ -256,6 +256,9 @@ SYSV void h_gl_swap_window(SDL_Window* w) {
     int dw = 0, dh = 0;
     SDL_GL_GetDrawableSize(g_window, &dw, &dh);
     gl::present_game_framebuffer(dw, dh);  // the game's frame, scaled into the window
+    // Movies fill wide screens (Settings > Presentation): scale them by the view's aspect over 16:9.
+    float view_aspect = *reinterpret_cast<const float*>(0x1cc1fac);
+    gl::set_movie_scale(app::config().movies_fill ? std::max(1.0f, view_aspect / (16.0f / 9.0f)) : 1.0f);
     ui::before_present();
     maybe_screenshot();
     if (++g_frames % 600 == 0) RLOG("frame %llu at %.1f s (game frame ms %d, clock %d s %.3f)", (unsigned long long)g_frames, SDL_GetTicks64() / 1000.0, *reinterpret_cast<const int*>(0x1dc416c), *reinterpret_cast<const int*>(0x17f8470), *reinterpret_cast<const float*>(0x17f8464));
