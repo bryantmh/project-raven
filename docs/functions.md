@@ -105,3 +105,89 @@ Script commands are a table of 0x80-byte records (handler at name-0x14, id at na
 | `0x494fa0` | `SceneStart(scene, flag)` | scene name at `+0`; `0x4957d0` ends one |
 | `0x4ab530` | `SetTrigger(domain, name)` | looks the trigger up in the hash table `0x1c1fac0` (`0x922160(table, name, 0)`), sets it and counts sets at `+0xb8` |
 | `0x438010` | `-random` flag | `0x1749fbf` |
+
+## Operator adjustments
+
+The cabinet's operator settings. Each one has a definition, `data/prod/adj/<core|game|online|redemption>/defs/<group>/<name>.txt`
+(encrypted; region subfolders such as `jp/` override per region), and an optional lookup table for its value names
+(`.../luts/<lut>.txt`). The saved value is `pmuser/adj/save/<group>/<name>.<0|1|2>.txt` (three copies). Each copy is
+u32 20, the SHA-1 of the body, u32 body length, then the body: `# RTDT Data Type AdjValStore` text with `name`,
+`version`, `time_set` and `val`. src/game/adjustments.cpp writes these into the save overlay before the game starts.
+
+| Address | Name | Notes |
+|---|---|---|
+| `0x540550` | `Adj_Init` | creates the `gAdjDefs` / `gAdjVals` hash tables |
+| `0x540080` | load `ADJ_DEF` files | for each def file: `0x4e6800("ADJ_DEF", path, "AdjDef", &def)`, then inserts the 256-byte `AdjDef` into `gAdjDefs` (`0x1cc3e00`) |
+| `0x4e6800` | RTDT object load | `(kind, path, type name, out)`: reads a file (decrypting it) and parses it into a struct of the named data type |
+| `0x910c00` | RTDT text parser | parses the data type headers (C structs), e.g. `AdjDef`, `AdjValStore`, `AudDef` |
+| `0x4e65f0` | FileLoad | looks the path up in `eFileMaps` (`0x922160`); flag `0x200000` → ArchiveLoad `0x5a8960`, `0x10000` → `0x774b00`, 0 → plain `0x92fe60` |
+| `0x53f270` | `Adj_GetValue(group, name)` | int |
+| `0x53f860` | `Adj_SetValue(group, name, value)` | clamps to the definition's range and sets the running value (not saved to disk) |
+| `0x53f7f0` | `(group, name, value)` setter (probably the default) | `0x434950` calls it and `Adj_SetValue` with 135 for `minGameTime` at boot, the second only when `0x53f660` returns nonzero |
+
+`AdjDef`: `name[64]`, `version` (+64), flag bytes `default_on_version_change, online_reconcile, hidden, inactive, loop,
+restart_required` (+68), then int32 `adminOnly` (+76), `default_value, min, max, step_value, divisor` (+80),
+`displayAsTime, Date, Currency, FracCurrency, WithRealCurrType, Percentage` (+100), `displayPriority` (+124),
+`lookup_table[64]` (+128), `sound_to_play[64]` (+192).
+
+`RAVEN_DUMP_SCRIPTS=<folder>` also wraps `0x4e6800` and logs every `AdjDef` (`adjdef <path> | name=... def=... min=...
+max=...` in raven.log), and saves the data type headers that `0x910c00` parses to `<folder>/rtdt/`.
+
+### What they are
+
+All 84 definitions in this build. Ones that matter for play:
+
+| Adjustment | Default | Range | What it does |
+|---|---|---|---|
+| `gameOptions/minGameTime` | 150 s (the game sets 135 at boot) | 30-1200 s, shown as a time | **Difficulty.** Player damage scales with how long that player has been playing, relative to this time (below) |
+| `gameOptions/violence` | 1 | 0-1, `violenceLUT` | gore level |
+| `gameOptions/HUDviolence` | 1 | 0-1, `violenceLUT` (hidden) | gore in the HUD; the Korean version (`kr/`) has its own default |
+| `gameOptions/subtitles` | 1 (on) | 0-1 | subtitles in mission movies: each movie's `*_movie_subtitles.txt` checks it once at the start (`BR_ON_ADJUSTMENT gameOptions,subtitles,SHOW,0` jumps when it's nonzero). Settings > Gameplay (off by default) edits that check out and makes each line in `movie_subtitles/` poll it every 6 frames, so it switches while a movie plays (src/game/script_patches.cpp) |
+| `hardware/forcefeedback` | 1 (on) | 0-1 | gun recoil (read in many places, `0x42ae20`-`0x44d030`) |
+| `hardware/coloredRing` | 1 (on) | 0-1 | the guns' colored light rings |
+| `hardware/p1gun`-`p4gun` | 1 | 0-1, `diagEnableLUT` | gun enabled (`0x4178d0`) |
+| `hardware/LampBrightness` | 50 % | 0-100 (hidden, admin only) | cabinet lamps |
+| `sound/gameVolume` | 50 | 0-100 | game volume: read at startup (`0x437a20`) and passed to SetGameVolume `0x59ed20(float)`; Settings > Gameplay |
+| `sound/attractVolume` | 25 | 0-100 | attract mode volume |
+| `sound/attractSoundFreq` | 1 | 0-3, `attractSoundFreqs` | how often attract mode plays sound |
+| `languages/language` | 0 | 0-10, `languages` | language (restart required) |
+| `playerCost/freeplay` | 0 | 0-1 | free play (Project Raven sets it from Settings) |
+| `playerCost/gameCost`, `continueCost` | 200, 100 | currency | cost to start / continue; unused in free play |
+| `playerCost/bonusPrice*` | | | "N games for X" pricing |
+
+The rest are business settings: `coin/*` (coin values per region), `altPay/*` (card readers), `collection/*` (fees,
+splits), `tickets/*` (redemption tickets: `ticketMode` off by default), `online/*` and `onlineperms/*` (Raw Thrills
+servers), `switch_telem/*` (button fault detection), `dateTime/*`. There is no adjustment for difficulty other than
+`minGameTime`, for lives, or for player health.
+
+### Damage over play time (`minGameTime`)
+
+Player damage, `0x419760(slot, damage)`: players at `0x1c0c7c0`, stride `0x250`; health at `+0x14` (1000 full),
+play time in ms at `+0x88`. `t` is play time / (`minGameTime` × 1000). The tuning values come from the
+`player_health` variable table (`0x1c0d4a0`, read with GetFloat `0x9247a0(table, key, default)` on every hit). The game
+fills it with values other than the code defaults (where from isn't known; not the scripts or `data/prod/conf`):
+
+| Key | Code default | Value at run time | Meaning |
+|---|---|---|---|
+| `GAMETIME_DAMAGE_START` | 0.2 | 0.3 | damage multiplier at `t = 0` |
+| `GAMETIME_DAMAGE_LOW` | 0.5 | 1.0 | at `t = GAMETIME_NORMAL_TIME` |
+| `GAMETIME_DAMAGE_HIGH` | 2.0 | 2.5 | at `t = GAMETIME_HARD_TIME` |
+| `GAMETIME_DAMAGE_KILL` | 3.0 | 5.0 | at `t = GAMETIME_KILL_TIME` and after |
+| `GAMETIME_NORMAL_TIME` | 0.5 | 1.0 | |
+| `GAMETIME_HARD_TIME` | 1.5 | 1.125 | |
+| `GAMETIME_KILL_TIME` | 2.0 | 1.25 | |
+| `GAMETIME_DAMAGE_MOD` | 0.5 | | damage past the health floor is multiplied by this |
+| `INVULNERABLE_TIME` | 3 s | | no damage for this long after joining |
+| `player_health` | 1000 | | |
+
+The multiplier is linear between those points (`0x419a2a`, `0x419b2f`, `0x419ce8`). On top of it, health has a floor of
+`(1 - t) × player_health` (`0x419a79`): damage that would go below it is cut to `GAMETIME_DAMAGE_MOD` of the excess
+(`0x419d70`). So with the cabinet's 135 s you take 0.3× damage at first, rising to 1× at 135 s, then 2.5× at 152 s
+and 5× from 169 s; until 135 s health only drains about as fast as the floor falls, so you can't die early. Then
+damage climbs to end the credit. Measured (`RAVEN_DAMAGE_LOG`): 30-point hits took 9, then 1-2 per hit once health
+reached the floor.
+
+Settings > Gameplay > Difficulty (src/game/gameplay.cpp) wraps GetFloat: for Easy / Normal / Heroic / Legendary it
+answers all four `GAMETIME_DAMAGE_*` curve keys with 0.5 / 1 / 2 / 3 (a flat curve) and `GAMETIME_DAMAGE_MOD` with 1
+(no floor). Measured: 30-point hits take 30 on Normal and 90 on Legendary, and the game continues as usual at 0 health
+("CONTINUE?" countdown). Arcade leaves them alone. `RAVEN_DAMAGE_LOG=1` logs every hit with health before and after.

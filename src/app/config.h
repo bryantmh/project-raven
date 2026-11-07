@@ -10,6 +10,11 @@ struct Config {
     std::string fmod_dll;     // FMOD Studio 1.10 runtime (src/audio/fmod_bridge.cpp)
     bool free_play = true;    // operator adjustment playerCost/freeplay (src/game/patches.cpp)
 
+    // Gameplay (src/game/gameplay.cpp)
+    int difficulty = 2;       // 0 = arcade (damage grows with play time), 1 easy, 2 normal, 3 heroic, 4 legendary
+    bool subtitles = false;   // operator adjustment gameOptions/subtitles (mission movies; live, src/game/script_patches.cpp)
+    int game_volume = 50;     // operator adjustment sound/gameVolume, 0-100
+
     // Display
     int window_width = 1920, window_height = 1080;  // windowed size
     int display_mode = 0;                           // 0 = windowed, 1 = borderless fullscreen, 2 = exclusive fullscreen

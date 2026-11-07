@@ -43,6 +43,10 @@ Player 2 joins by pressing Start during a mission.
 
 Press **Select** or **F1**. The game pauses while the menu is open. **L1 / R1** (or **Q / E**) switch tabs.
 
+- **Gameplay**: difficulty. **Normal** (the default) means steady damage for the whole mission. **Easy**, **Heroic** and
+  **Legendary** take half, double and triple damage. **Arcade** is the original: you can't die for the first couple of
+  minutes, then damage climbs fast to end the credit. Difficulty can be changed in the middle of a mission. Also
+  subtitles in mission movies (off by default; switching them works while a movie plays) and the game volume.
 - **Display**: windowed, borderless or fullscreen; resolution; aspect ratio (Auto, 16:9, 21:9); how the HUD is laid
   out on wide screens; VSync and frame rate limit.
 - **Controls**: remap any action (two controller buttons and two keys each). Click a slot and press the new button.

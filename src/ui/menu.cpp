@@ -20,6 +20,7 @@
 #include "app/paths.h"
 #include "gl/gl_bridge.h"
 #include "input/bindings.h"
+#include "game/gameplay.h"
 #include "game/movie_skip.h"
 #include "input/input.h"
 #include "ui/glyphs.h"
@@ -279,6 +280,18 @@ void tab_general(app::Config& c) {
     ImGui::TextDisabled("Audio: FMOD Studio by Firelight Technologies Pty Ltd.");
 }
 
+void tab_gameplay(app::Config& c) {
+    combo("Difficulty", c.difficulty, {"Arcade (gets harder the longer you play)", "Easy", "Normal", "Heroic", "Legendary"});
+    static const char* const kNotes[] = {
+        "The original: you can't die for the first couple of minutes, then damage climbs fast (up to 5x) to end the credit.",
+        "You take half damage.", "You take normal damage the whole time.", "You take double damage.",
+        "You take triple damage."};
+    ImGui::TextDisabled("%s", kNotes[std::clamp(c.difficulty, 0, 4)]);
+    ImGui::Separator();
+    if (checkbox("Subtitles in mission movies", c.subtitles)) game::apply_subtitles();
+    if (slider("Game volume", c.game_volume, 0, 100, "%d")) game::apply_game_volume();
+}
+
 void tab_display(app::Config& c) {
     if (combo("Display mode", c.display_mode, {"Windowed", "Borderless fullscreen", "Exclusive fullscreen"}))
         sdl::apply_display_mode();
@@ -419,10 +432,10 @@ void draw_menu(int w, int h) {
     ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(1250 * scale, disp.x - 20), std::min(1000 * scale, disp.y * 0.94f)), ImGuiCond_Always);
     ImGui::Begin("Project Raven", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
-    // RAVEN_MENU_TAB=<0-3>: start on that tab (automated screenshots).
+    // RAVEN_MENU_TAB=<0-4>: start on that tab (automated screenshots).
     static int first_tab = [] { const char* t = std::getenv("RAVEN_MENU_TAB"); return t ? std::atoi(t) : -1; }();
     // L1/R1 (LB/RB), Q/E or Ctrl+Tab move between tabs (g_tab_step, from run()).
-    constexpr int kTabs = 4;
+    constexpr int kTabs = 5;
     if (g_tab_step) {
         first_tab = ((g_current_tab + g_tab_step) % kTabs + kTabs) % kTabs;
         g_tab_step = 0;
@@ -443,9 +456,10 @@ void draw_menu(int w, int h) {
             ImGui::EndTabItem();
         };
         tab("General", 0, tab_general);
-        tab("Display", 1, tab_display);
-        tab("Controls", 2, tab_controls);
-        tab("Presentation", 3, tab_presentation);
+        tab("Gameplay", 1, tab_gameplay);
+        tab("Display", 2, tab_display);
+        tab("Controls", 3, tab_controls);
+        tab("Presentation", 4, tab_presentation);
         first_tab = -1;
         ImGui::EndTabBar();
     }

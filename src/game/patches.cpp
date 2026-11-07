@@ -8,6 +8,7 @@
 #include "app/config.h"
 #include "game/adjustments.h"
 #include "game/boot_screen.h"
+#include "game/gameplay.h"
 #include "game/script_patches.h"
 #include "game/ui_aspect.h"
 #include "game/view_aspect.h"
@@ -58,6 +59,7 @@ void apply_patches() {
         if (p[0] == 0x81 && p[1] == 0xFB && p[2] == 0x2F && p[3] == 0x75) p[2] = p[3] = 0;
         else RLOG("patch: unexpected bytes at 0x4493f8");
     }
+    install_gameplay();
     install_script_patches();
     install_boot_screen();
     install_ui_aspect();

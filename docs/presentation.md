@@ -100,8 +100,8 @@ by `assets/boot.jpg`, drawn with a framebuffer blit (src/game/boot_screen.cpp).
 
 Dear ImGui over the game's GL context. Select / F1 opens it; the game thread stays in the hooked swap running the
 menu (the last frame kept in a texture) and FMOD's master channel group is paused. Test hooks: `RAVEN_MENU_AT`
-(open after that many seconds), `RAVEN_MENU_SECONDS` (close after), `RAVEN_MENU_TAB` (0 General, 1 Display,
-2 Controls, 3 Presentation), `RAVEN_MENU_SCROLL`, `RAVEN_MENU_ICONS` (1 Xbox, 2 PlayStation). Periodic shots
+(open after that many seconds), `RAVEN_MENU_SECONDS` (close after), `RAVEN_MENU_TAB` (0 General, 1 Gameplay,
+2 Display, 3 Controls, 4 Presentation), `RAVEN_MENU_SCROLL`, `RAVEN_MENU_ICONS` (1 Xbox, 2 PlayStation). Periodic shots
 (`RAVEN_SHOT_SECONDS`) keep running while it's open; the script's `shot:` doesn't, since game input is paused.
 
 ## Icon
