@@ -78,6 +78,28 @@ strings:
 
 Script commands are a table of 0x80-byte records (handler at name-0x14, id at name-4), e.g. `TRANS` (id 0x6d, `0x50ccf0`), `SCALE` (0x73, `0x520510`).
 
+## Cabinet type
+
+`SysInfoGameCabinetType` comes from the dongle: `ReadCabinetType` (`0x639950`, ctx, `uint8_t* out`) reads byte `0x29`
+of its memory, main (`0x437a20`) stores it, and `0x5864b0` returns it (cached at `0x1800e60`). About 90 places
+branch on it. The names are the factory setup's ("Confirm Cab", `0x4440a0`, table `0x16f9360` via `0x639cf0`):
+
+| Type | Name | Screen | Players | Notes |
+|---|---|---|---|---|
+| 3 | Super Deluxe | one 16:9 | 4 (slots 0-3) | IR camera guns: the I/O setup (`0x436230`) adds I/O flag 8, the IR tracker driver (`0x16f8400`, init `0x623f30`, camera manager `cmgr_init` `0xdcf220`), and two RIO boards are expected |
+| 4 | Mounted Gun | one 16:9 | 2 (slots 0, 3) | sets `0x1749faa` (read by `0x438030`) |
+| 8 | 55" Dedicated | one 16:9 | 2 (slots 0, 3) | IR guns like type 3 |
+| 9 | Dual Screen | 3880x1080 | 4 (slots 0-3) | |
+
+Types 3 and 9 are tested together about 26 times (4 players: `0x418020`, and the script command `BR_ON_DUAL_SCREEN`
+`0x51ca80`, which is really "4-player"), types 4 and 8 about 22 times (`(type - 4) & ~4 == 0`: join loop, gun enable).
+Seats: slot 0 Ethan Graves, 1 Marcus Hudson, 2 Victor Ramos, 3 Ava Lang (`rackup*/player<n>_winner` speech).
+
+"Up to 4 players" (src/game/players.cpp) answers `ReadCabinetType` with 3 and sets type 3 up without its hardware:
+`jle 0x436630` at `0x436415` (types below 4) becomes `jle 0x4365b8`, type 4's I/O branch (no IR tracker, whose camera
+thread crashes with no cameras), and `jbe` at `0x4adbc1` in the RIO board check (`0x4adac0`; expected board count
+`0x6213f0`) becomes `jmp`, so boot doesn't halt on "missing 2 board(s)".
+
 ## Rendering
 
 | Address | Name | Notes |
@@ -99,9 +121,9 @@ Script commands are a table of 0x80-byte records (handler at name-0x14, id at na
 | `0x4acfe0` | `IoRemapSource(logical)` | the physical mapped to a logical, or -1; game code skips a gun whose axes have none |
 | `0x4ad6e8` | remap copy (in `0x4ad370`) | every frame, for each remap: copies the physical analog channel (`0x61ee70`) over the logical one (`0x4ac220`) |
 | `0x4ae030` | `IoChannel(id)` | logical / physical analog channel pointer (jump table `0x1147cb0`, ids `0x200-0x2f2`); `0x4af0a0` reads its value |
-| `0x61ee70` | `DriverAnalog(physical)` | PC driver analog channel: `0x201-0x203` mouse X/Y/wheel, `0x21d-0x220`, `0x239-0x298` joystick axes; 32-bit offset table at `0x11bcd70` (from itself) for `0x201-0x3c5`. Project Raven points `0x210/0x211` at player 2's channels |
-| `0x4269e0` | player join loop | per slot 0-3: start switch `0x24e+slot`, `MARK_PLAYER_JOIN`; on this cabinet type slots 1 and 2 are skipped (2 players = slots 0 and 3) |
-| `0x4178d0` | `GunEnabled(slot)` | adjustment `hardware/p<n>gun` (slot 3 reads `p2gun` on this cabinet type) |
+| `0x61ee70` | `DriverAnalog(physical)` | PC driver analog channel: `0x201-0x203` mouse X/Y/wheel, `0x21d-0x220`, `0x239-0x298` joystick axes; 32-bit offset table at `0x11bcd70` (from itself) for `0x201-0x3c5`. Project Raven points `0x210-0x215` at guns 3, 1 and 2's channels |
+| `0x4269e0` | player join loop | per slot 0-3: start switch `0x24e+slot`, `MARK_PLAYER_JOIN`; on cabinet types 4 and 8 slots 1 and 2 are skipped (2 players = slots 0 and 3) |
+| `0x4178d0` | `GunEnabled(slot)` | adjustment `hardware/p<n>gun` (on types 4 and 8 slot 3 reads `p2gun`) |
 | `0x494fa0` | `SceneStart(scene, flag)` | scene name at `+0`; `0x4957d0` ends one |
 | `0x4ab530` | `SetTrigger(domain, name)` | looks the trigger up in the hash table `0x1c1fac0` (`0x922160(table, name, 0)`), sets it and counts sets at `+0xb8` |
 | `0x438010` | `-random` flag | `0x1749fbf` |

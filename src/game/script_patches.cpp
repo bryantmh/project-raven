@@ -14,6 +14,7 @@
 
 #include "app/config.h"
 #include "game/hook.h"
+#include "game/players.h"
 #include "linux/shim.h"
 #include "log.h"
 
@@ -44,6 +45,10 @@ const Edit kEdits[] = {
     {"attract_2d/MoneyIn_Cost2.txt", "#-EndHeader", HIDE_FOREVER, &app::Config::hide_credit_text},
     {"moneyin_game/MoneyInGame_Cost.txt", "#-EndHeader", HIDE_FOREVER, &app::Config::hide_credit_text},
     {"moneyin_game/MoneyInGame_Cost2.txt", "#-EndHeader", HIDE_FOREVER, &app::Config::hide_credit_text},
+    // The 4-player cabinet's, one per seat.
+    {"moneyin_game/MoneyInGame_Cost1.txt", "#-EndHeader", HIDE_FOREVER, &app::Config::hide_credit_text},
+    {"moneyin_game/MoneyInGame_Cost3.txt", "#-EndHeader", HIDE_FOREVER, &app::Config::hide_credit_text},
+    {"moneyin_game/MoneyInGame_Cost4.txt", "#-EndHeader", HIDE_FOREVER, &app::Config::hide_credit_text},
     // Xbox Live "Get Connected" screen: the boot flow still loads its scene for one frame (src/game/patches.cpp
     // ends the wait); never create the popup itself, so nothing flashes.
     {"online_popup/online_popup.txt", "trigger = SCENE_START", "trigger = RAVEN_NEVER", &app::Config::skip_xbox_screen},
@@ -63,12 +68,6 @@ const Edit kEdits[] = {
     // Mission movies: "Press RELOAD to skip" (a texture); Project Raven draws "Press <Start icon> to skip" instead
     // (src/game/movie_skip.cpp).
     {"intro_movie/skip_text.txt", "#-EndHeader", HIDE_FOREVER, &app::Config::start_skips_movies},
-    // Player 2's "JOIN NOW / Press START" panel (slot 4 in the scripts) with Ava Lang's plaque and join movie, which
-    // stays on screen while nobody plays player 2. Display only: joining is handled in code (0x4269e0).
-    {"moneyin_game/CashPlay_P4_Msg.txt", "#-EndHeader", KILL_AT_START, &app::Config::hide_p2_join},
-    {"moneyin_game/join_plaq_p4.txt", "#-EndHeader", KILL_AT_START, &app::Config::hide_p2_join},
-    {"moneyin_game/join_in_p4_movie.txt", "#-EndHeader", KILL_AT_START, &app::Config::hide_p2_join},
-    {"moneyin_game/NoStart_P4_Msg.txt", "#-EndHeader", KILL_AT_START, &app::Config::hide_p2_join},
     // Subtitles in mission movies (Settings > Gameplay), switchable while a movie plays. Each movie's subtitle
     // program checks the adjustment once and skips the subtitle scene when it's off: always play the scene.
     {"*_movie_subtitles.txt", "BR_ON_ADJUSTMENT gameOptions,subtitles,SHOW,0", "GOTO             SHOW", nullptr},
@@ -94,6 +93,24 @@ const Edit kEdits[] = {
 bool ends_with(const char* s, const char* suffix) {
     size_t a = std::strlen(s), b = std::strlen(suffix);
     return a >= b && std::memcmp(s + a - b, suffix, b) == 0;
+}
+
+// "Hide the other ODSTs' JOIN NOW panels" (hide_p2_join): each seat's "JOIN NOW / Press START" panel (scripts number
+// the seats 1-4, the gun slots 0-3), with the ODST's plaque and join movie, stays on screen while nobody plays it.
+// Hide every seat but player 1's ODST. Display only: joining is handled in code (0x4269e0).
+bool hidden_join_panel(const char* path) {
+    if (!app::config().hide_p2_join) return false;
+    static const char* const kFiles[] = {"moneyin_game/CashPlay_P%d_Msg.txt", "moneyin_game/join_plaq_p%d.txt",
+                                         "moneyin_game/join_in_p%d_movie.txt", "moneyin_game/NoStart_P%d_Msg.txt"};
+    for (int slot = 0; slot < kMaxPlayers; slot++) {
+        if (slot == player_slot(0)) continue;
+        for (const char* f : kFiles) {
+            char name[64];
+            std::snprintf(name, sizeof name, f, slot + 1);
+            if (ends_with(path, name)) return true;
+        }
+    }
+    return false;
 }
 
 // RAVEN_DUMP_SCRIPTS=<folder>: save every decrypted script there (tree under data/), for finding what to edit.
@@ -127,6 +144,11 @@ void after_load(const char* path, char** buf, uint32_t* size, AllocFn alloc, Fre
     dump(path, *buf, *size);
     std::string text;
     bool changed = false;
+    if (hidden_join_panel(path)) {
+        text.assign(*buf, std::strlen(*buf) < *size ? std::strlen(*buf) : *size);
+        size_t at = text.find("#-EndHeader");
+        if (at != std::string::npos) text.replace(at, std::strlen("#-EndHeader"), KILL_AT_START), changed = true;
+    }
     for (auto& e : kEdits) {
         if (e.enabled && !(app::config().*e.enabled)) continue;
         bool any = e.file[0] == '*';

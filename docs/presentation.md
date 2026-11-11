@@ -26,7 +26,9 @@ passes are untouched):
 
 - **16:9**: undo the stretch about the screen center (the canvas shows as a centered 16:9 area).
 - **Corners** (default, missions only; the menus use 16:9): undo the stretch about each element's center; elements in the outer 20% of the canvas keep
-  their distance to the nearest real screen edge, the rest to the center.
+  their distance to the nearest real screen edge, the rest to the center. On the 4-player cabinet each ODST's HUD
+  fills a quarter of the canvas, so the outer quarters go to the edges whole (a 20% band left Graves's and Lang's kill
+  counters behind) and the inner two stay centered.
 - Menus vs missions: the game's scene manager (`0x494fa0` starts a scene, its name at +0) is hooked; the last of
   `level_<n>` (mission) or `attract_2d` / `game_select*` / `chaptersel` (menus) started decides
   (`game::in_mission()`, src/game/view_aspect.cpp; `RAVEN_SCENEDEBUG=1` logs every scene start). A 3D camera is no
@@ -48,6 +50,8 @@ passes are untouched):
     overlay: the game draws some canvas content into a texture first and shows it that way (the mission select's
     highlight frame), and movie planes are such quads too (filled by `draw_movie_scaled`). Those are laid out like
     other elements; stretching them put the highlight frame off its tile and stretched movies twice.
+    In missions a quad as tall as the canvas (each player's damage tint over their half or quarter) is an overlay
+    too, so the tints still tile the screen.
   - **Crosshairs in missions** stay where the game draws them, on what the shot hits. The game smooths the guns, so
     a moving crosshair trails the aim by 2-4 frames and matches no exact aim value; picking crosshairs by position
     made them flip between moved and unmoved (the reticle "jumped"). Instead they are keyed by bound texture

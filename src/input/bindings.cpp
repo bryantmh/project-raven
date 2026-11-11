@@ -3,10 +3,12 @@
 
 #include <SDL.h>
 
+#include <algorithm>
 #include <cstring>
 #include <map>
 
 #include "app/config.h"
+#include "input/input.h"
 #include "log.h"
 
 namespace raven::input {
@@ -36,7 +38,7 @@ const ActionInfo kDefaults[kActionCount] = {
     {"aim_right", "Aim right", {P(SDL_CONTROLLER_BUTTON_DPAD_RIGHT), N}, {K(SDL_SCANCODE_RIGHT), K(SDL_SCANCODE_D)}},
 };
 
-Bind g_pad[kActionCount][kSlots], g_keys[kActionCount][kSlots];
+Bind g_pad[kBindPlayers][kActionCount][kSlots], g_keys[kActionCount][kSlots];
 
 // ---- text form: "a|righttrigger" (controller), "mouse1|Space" (keyboard); "" for an empty slot
 std::string to_text(const Bind& b) {
@@ -63,10 +65,15 @@ Bind from_text(const std::string& s, bool pad) {
     auto sc = SDL_GetScancodeFromName(s.c_str());
     return sc == SDL_SCANCODE_UNKNOWN ? Bind{} : K(sc);
 }
+// Config key of a player's controller binding: "pad_<action>" for player 1, "p<n>_pad_<action>" for the others.
+std::string pad_key(int player, const char* action) {
+    return (player ? "p" + std::to_string(player + 1) + "_" : std::string()) + "pad_" + action;
+}
 void store(Action a) {
     auto& cfg = app::config().binds;
     const char* key = kDefaults[int(a)].key;
-    cfg[std::string("pad_") + key] = to_text(g_pad[int(a)][0]) + "|" + to_text(g_pad[int(a)][1]);
+    for (int p = 0; p < kBindPlayers; p++)
+        cfg[pad_key(p, key)] = to_text(g_pad[p][int(a)][0]) + "|" + to_text(g_pad[p][int(a)][1]);
     cfg[std::string("key_") + key] = to_text(g_keys[int(a)][0]) + "|" + to_text(g_keys[int(a)][1]);
 }
 
@@ -85,11 +92,14 @@ struct {
 }  // namespace
 
 const char* action_name(Action a) { return kDefaults[int(a)].name; }
-Bind pad_bind(Action a, int slot) { return g_pad[int(a)][slot]; }
+Bind pad_bind(Action a, int slot, int player) {
+    return player >= 0 && player < kBindPlayers ? g_pad[player][int(a)][slot] : Bind{};
+}
 Bind key_bind(Action a, int slot) { return g_keys[int(a)][slot]; }
 
-void set_bind(Action a, bool pad, int slot, Bind b) {
-    auto& table = pad ? g_pad : g_keys;
+void set_bind(Action a, bool pad, int slot, Bind b, int player) {
+    if (player < 0 || player >= kBindPlayers) return;
+    auto& table = pad ? g_pad[player] : g_keys;
     if (b.kind != Bind::None)
         for (int i = 0; i < kActionCount; i++)
             for (int s = 0; s < kSlots; s++)
@@ -101,9 +111,19 @@ void set_bind(Action a, bool pad, int slot, Bind b) {
     store(a);
 }
 
+void copy_pad_binds(int from) {
+    if (from < 0 || from >= kBindPlayers) return;
+    for (int p = 0; p < kBindPlayers; p++)
+        if (p != from) std::memcpy(g_pad[p], g_pad[from], sizeof g_pad[p]);
+    for (int i = 0; i < kActionCount; i++) store(Action(i));
+}
+
 void reset_binds() {
     for (int i = 0; i < kActionCount; i++) {
-        for (int s = 0; s < kSlots; s++) g_pad[i][s] = kDefaults[i].pad[s], g_keys[i][s] = kDefaults[i].keys[s];
+        for (int s = 0; s < kSlots; s++) {
+            for (auto& player : g_pad) player[i][s] = kDefaults[i].pad[s];
+            g_keys[i][s] = kDefaults[i].keys[s];
+        }
         store(Action(i));
     }
 }
@@ -113,18 +133,26 @@ void load_binds() {
     // Drop stored bindings of actions that no longer exist.
     for (auto it = cfg.begin(); it != cfg.end();) {
         bool known = false;
-        for (auto& d : kDefaults) known |= it->first == std::string("pad_") + d.key || it->first == std::string("key_") + d.key;
+        for (auto& d : kDefaults) {
+            known |= it->first == std::string("key_") + d.key;
+            for (int p = 0; p < kBindPlayers; p++) known |= it->first == pad_key(p, d.key);
+        }
         it = known ? std::next(it) : cfg.erase(it);
     }
+    auto parse = [](const std::string& v, bool pad, Bind* out) {
+        auto bar = v.find('|');
+        std::string a = v.substr(0, bar), b = bar == std::string::npos ? "" : v.substr(bar + 1);
+        out[0] = from_text(a, pad);
+        out[1] = from_text(b, pad);
+    };
     for (int i = 0; i < kActionCount; i++) {
-        for (int s = 0; s < kSlots; s++) g_pad[i][s] = kDefaults[i].pad[s], g_keys[i][s] = kDefaults[i].keys[s];
-        for (bool pad : {true, false}) {
-            auto it = cfg.find(std::string(pad ? "pad_" : "key_") + kDefaults[i].key);
-            if (it == cfg.end()) continue;
-            auto bar = it->second.find('|');
-            std::string a = it->second.substr(0, bar), b = bar == std::string::npos ? "" : it->second.substr(bar + 1);
-            (pad ? g_pad : g_keys)[i][0] = from_text(a, pad);
-            (pad ? g_pad : g_keys)[i][1] = from_text(b, pad);
+        for (int s = 0; s < kSlots; s++) g_pad[0][i][s] = kDefaults[i].pad[s], g_keys[i][s] = kDefaults[i].keys[s];
+        if (auto it = cfg.find(std::string("key_") + kDefaults[i].key); it != cfg.end()) parse(it->second, false, g_keys[i]);
+        if (auto it = cfg.find(pad_key(0, kDefaults[i].key)); it != cfg.end()) parse(it->second, true, g_pad[0][i]);
+        // Players 2-4 used player 1's controller bindings before each player had their own: start from those.
+        for (int p = 1; p < kBindPlayers; p++) {
+            std::memcpy(g_pad[p][i], g_pad[0][i], sizeof g_pad[p][i]);
+            if (auto it = cfg.find(pad_key(p, kDefaults[i].key)); it != cfg.end()) parse(it->second, true, g_pad[p][i]);
         }
     }
 }
@@ -147,9 +175,9 @@ std::string bind_label(const Bind& b) {
     }
 }
 
-bool pad_action(SDL_GameController* pad, Action a) {
-    if (!pad) return false;
-    for (const Bind& b : g_pad[int(a)]) {
+bool pad_action(int player, SDL_GameController* pad, Action a) {
+    if (!pad || player < 0 || player >= kBindPlayers) return false;
+    for (const Bind& b : g_pad[player][int(a)]) {
         if (b.kind == Bind::PadButton && SDL_GameControllerGetButton(pad, SDL_GameControllerButton(b.code))) return true;
         if (b.kind == Bind::PadTrigger && trigger(pad, b.code) > 0.4f) return true;
     }
@@ -199,7 +227,9 @@ Bind bind_from_event(const SDL_Event& e) {
 bool event_presses(const SDL_Event& e, Action a) {
     Bind b = bind_from_event(e);
     if (b.kind == Bind::None) return false;
-    const auto& row = b.is_pad() ? g_pad[int(a)] : g_keys[int(a)];
+    int which = e.type == SDL_CONTROLLERAXISMOTION ? e.caxis.which : e.cbutton.which;
+    int player = b.is_pad() ? std::max(0, player_of_controller(which)) : 0;
+    const auto& row = b.is_pad() ? g_pad[player][int(a)] : g_keys[int(a)];
     for (const Bind& x : row)
         if (x == b) return true;
     return false;

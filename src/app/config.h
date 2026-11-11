@@ -14,6 +14,8 @@ struct Config {
     int difficulty = 2;       // 0 = arcade (damage grows with play time), 1 easy, 2 normal, 3 heroic, 4 legendary
     bool subtitles = false;   // operator adjustment gameOptions/subtitles (mission movies; live, src/game/script_patches.cpp)
     int game_volume = 50;     // operator adjustment sound/gameVolume, 0-100
+    bool four_players = false;  // report the 4-player cabinet (type 3, src/game/players.cpp) instead of the user's own
+    int odst[4] = {0, 1, 2, 3}; // the ODST (gun slot: Graves, Hudson, Ramos, Lang) each player wants; "odst_p<n>"
 
     // Display
     int window_width = 1920, window_height = 1080;  // windowed size
@@ -32,7 +34,7 @@ struct Config {
     bool boot_image = true;         // show assets/boot.jpg instead of the boot text
     bool start_skips_movies = true; // Start skips mission movies, with the Start button's icon in the prompt
     bool movies_fill = true;        // mission movies fill wide screens (src/gl/gl_bridge.cpp)
-    bool hide_p2_join = false;      // hide player 2's "JOIN NOW / Press START" panel
+    bool hide_p2_join = false;      // hide the "JOIN NOW / Press START" panels of every ODST but player 1's
 
     // Controls (src/input/input.cpp)
     int rumble = 100;        // controller rumble strength, percent (0 = off)

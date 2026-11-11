@@ -22,6 +22,7 @@
 #include "input/bindings.h"
 #include "game/gameplay.h"
 #include "game/movie_skip.h"
+#include "game/players.h"
 #include "input/input.h"
 #include "ui/glyphs.h"
 #include "log.h"
@@ -41,7 +42,9 @@ struct Capture {
     input::Action action{};
     int slot = 0;
     uint64_t started = 0;
+    int player = 0;  // whose controller bindings
 } g_capture;
+int g_bind_player = 0;  // Controls tab: the player whose controller bindings the table shows
 // After a capture ends, the button or key that ended it may still be held. ImGui reads controller buttons from their
 // held state, so a slot would see X / Square still down on the next frame and clear the binding just made. Nothing
 // is cleared until everything is released.
@@ -81,8 +84,9 @@ bool capture_event(const SDL_Event& e) {
     }
     input::Bind b = input::bind_from_event(e);
     if (b.kind == input::Bind::None || b.is_pad() != c.pad) return true;
-    input::set_bind(c.action, c.pad, c.slot, b);
-    RLOG("menu: bound %s slot %d to %s", input::action_name(c.action), c.slot + 1, input::bind_label(b).c_str());
+    input::set_bind(c.action, c.pad, c.slot, b, c.player);
+    RLOG("menu: bound %s slot %d to %s (player %d)", input::action_name(c.action), c.slot + 1, input::bind_label(b).c_str(),
+         c.player + 1);
     c.active = false;
     g_wait_release = true;
     app::save_config();
@@ -288,6 +292,11 @@ void tab_gameplay(app::Config& c) {
         "You take triple damage."};
     ImGui::TextDisabled("%s", kNotes[std::clamp(c.difficulty, 0, 4)]);
     ImGui::Separator();
+    int players = c.four_players ? 1 : 0;
+    if (combo("Players", players, {"Up to 2 (the original cabinet)", "Up to 4 (the 4-player cabinet)"}, true))
+        c.four_players = players == 1;
+    ImGui::TextDisabled("Up to 4 runs the game as its 4-player cabinet: all four ODSTs can join, with a HUD for each.");
+    ImGui::Separator();
     if (checkbox("Subtitles in mission movies", c.subtitles)) game::apply_subtitles();
     if (slider("Game volume", c.game_volume, 0, 100, "%d")) game::apply_game_volume();
 }
@@ -330,22 +339,23 @@ PadStyle pad_style(const app::Config& c) {
 
 // One binding slot: a button showing the icon; click to rebind, right-click (or the controller's X / Square) to
 // clear.
-void bind_slot(input::Action a, bool pad, int slot, PadStyle style, float w) {
+void bind_slot(input::Action a, bool pad, int slot, PadStyle style, float w, int player) {
     using input::Bind;
-    Bind b = pad ? input::pad_bind(a, slot) : input::key_bind(a, slot);
+    Bind b = pad ? input::pad_bind(a, slot, player) : input::key_bind(a, slot);
     float h = ImGui::GetFrameHeight();
     ImGui::PushID(int(a) * 8 + (pad ? 4 : 0) + slot);
-    bool capturing = g_capture.active && g_capture.action == a && g_capture.pad == pad && g_capture.slot == slot;
+    bool capturing = g_capture.active && g_capture.action == a && g_capture.pad == pad && g_capture.slot == slot &&
+                     (!pad || g_capture.player == player);
     ImVec2 pos = ImGui::GetCursorScreenPos();
     if (g_focus_slot == int(a) * 8 + (pad ? 4 : 0) + slot) ImGui::SetKeyboardFocusHere(), g_focus_slot = -1;
     if (ImGui::Button("##slot", ImVec2(w, h * 1.25f))) {
-        g_capture = {true, false, pad, a, slot, SDL_GetTicks64()};
+        g_capture = {true, false, pad, a, slot, SDL_GetTicks64(), player};
     }
     bool clear = ImGui::IsItemClicked(ImGuiMouseButton_Right) ||
                  (ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false));
     if (clear && !g_capture.active && !g_wait_release) {
-        input::set_bind(a, pad, slot, Bind{});
-        RLOG("menu: cleared %s slot %d", input::action_name(a), slot + 1);
+        input::set_bind(a, pad, slot, Bind{}, player);
+        RLOG("menu: cleared %s slot %d (player %d)", input::action_name(a), slot + 1, player + 1);
         app::save_config();
     }
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -365,19 +375,54 @@ void bind_slot(input::Action a, bool pad, int slot, PadStyle style, float w) {
     ImGui::PopID();
 }
 
+// Player p's ODST: the ODSTs this cabinet has. Picking one another player has swaps the two.
+void odst_combo(app::Config& c, int p) {
+    int mine = game::player_slot(p);
+    // "Ethan Graves (blue)": the color of their JOIN NOW panel, HUD and crosshair, for players who don't know the names.
+    auto label = [](int slot) { return std::string(game::odst_name(slot)) + " (" + game::odst_color(slot) + ")"; };
+    ImGui::PushID(p);
+    ImGui::SetNextItemWidth(ImGui::CalcTextSize("Marcus Hudson (orange)").x + ImGui::GetFrameHeight() * 2);
+    if (ImGui::BeginCombo("##odst", label(mine).c_str())) {
+        for (int seat = 0; seat < game::slot_count(); seat++) {
+            int slot = game::slot_at(seat);
+            if (!ImGui::Selectable(label(slot).c_str(), slot == mine) || slot == mine) continue;
+            // Write everyone's current ODST, then swap with whoever had this one.
+            for (int i = 0; i < game::player_count(); i++) c.odst[i] = game::player_slot(i);
+            for (int i = 0; i < game::player_count(); i++)
+                if (c.odst[i] == slot) c.odst[i] = mine;
+            c.odst[p] = slot;
+            g_dirty = true;
+            RLOG("menu: player %d plays %s", p + 1, game::odst_name(slot));
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PopID();
+}
+
 void tab_controls(app::Config& c) {
     using input::Action;
     PadStyle style = pad_style(c);
-    // Who plays with what.
-    for (int p = 0; p < 2; p++) {
-        std::string who = p == 0 ? "Keyboard & mouse" : "";
-        const char* pad = input::controller_name(p);
-        if (*pad) who += (who.empty() ? "" : " + ") + std::string(pad);
-        ImGui::Text("Player %d:", p + 1);
-        ImGui::SameLine();
-        if (who.empty()) ImGui::TextDisabled("connect a controller");
-        else ImGui::TextUnformatted(who.c_str());
+    // Who plays which ODST, with what.
+    int players = game::player_count();
+    if (ImGui::BeginTable("players", 3, ImGuiTableFlags_SizingFixedFit)) {
+        for (int p = 0; p < players; p++) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("Player %d", p + 1);
+            ImGui::TableNextColumn();
+            odst_combo(c, p);
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            std::string who = p == 0 ? "Keyboard & mouse" : "";
+            const char* pad = input::controller_name(p);
+            if (*pad) who += (who.empty() ? "" : " + ") + std::string(pad);
+            if (who.empty()) ImGui::TextDisabled("connect a controller");
+            else ImGui::TextUnformatted(who.c_str());
+        }
+        ImGui::EndTable();
     }
+    ImGui::TextDisabled("Each ODST has their own seat: their HUD, JOIN NOW panel and color.");
     if (checkbox("Keyboard & mouse is player 1, controllers start at player 2", c.kbm_own_player))
         input::reassign_controllers();
     combo("Button icons", c.button_icons, {"Match the controller", "Xbox", "PlayStation"});
@@ -386,27 +431,51 @@ void tab_controls(app::Config& c) {
     slider("Stick deadzone", c.aim_deadzone, 0, 50);
     ImGui::Separator();
     ImGui::TextDisabled("Both sticks aim. Click a slot and press the new button (Esc cancels);");
-    ImGui::TextDisabled("right-click or X / Square clears it. All controllers share these buttons.");
+    ImGui::TextDisabled("right-click or X / Square clears it. Each player has their own controller buttons.");
+    // Whose controller buttons the table shows: one button per player (the keyboard and mouse are player 1's).
+    g_bind_player = std::clamp(g_bind_player, 0, players - 1);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Buttons for");
+    for (int p = 0; p < players; p++) {
+        ImGui::SameLine();
+        char name[16];
+        std::snprintf(name, sizeof name, "Player %d", p + 1);
+        bool selected = p == g_bind_player;
+        if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        if (ImGui::Button(name)) g_bind_player = p, g_capture.active = false;
+        if (selected) ImGui::PopStyleColor();
+    }
+    bool keys = g_bind_player == 0;
     float slot_w = std::max(ImGui::GetFrameHeight() * 4.6f, ImGui::CalcTextSize("Press a button...").x + 20);
-    if (ImGui::BeginTable("binds", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX)) {
+    if (ImGui::BeginTable("binds", keys ? 5 : 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_PadOuterX)) {
         ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Controller", ImGuiTableColumnFlags_WidthFixed, slot_w);
         ImGui::TableSetupColumn("##pad2", ImGuiTableColumnFlags_WidthFixed, slot_w);
-        ImGui::TableSetupColumn("Keyboard & mouse", ImGuiTableColumnFlags_WidthFixed, slot_w);
-        ImGui::TableSetupColumn("##key2", ImGuiTableColumnFlags_WidthFixed, slot_w);
+        if (keys) {
+            ImGui::TableSetupColumn("Keyboard & mouse", ImGuiTableColumnFlags_WidthFixed, slot_w);
+            ImGui::TableSetupColumn("##key2", ImGuiTableColumnFlags_WidthFixed, slot_w);
+        }
         ImGui::TableHeadersRow();
+        ImGui::PushID(g_bind_player);
         for (int i = 0; i < input::kActionCount; i++) {
             auto a = Action(i);
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted(input::action_name(a));
-            for (int col = 0; col < 4; col++) {
+            for (int col = 0; col < (keys ? 4 : 2); col++) {
                 ImGui::TableNextColumn();
-                bind_slot(a, col < 2, col % 2, style, slot_w);
+                bind_slot(a, col < 2, col % 2, style, slot_w, g_bind_player);
             }
         }
+        ImGui::PopID();
         ImGui::EndTable();
+    }
+    if (players > 1) {
+        char copy[64];
+        std::snprintf(copy, sizeof copy, "Give every player player %d's buttons", g_bind_player + 1);
+        if (ImGui::Button(copy)) input::copy_pad_binds(g_bind_player), app::save_config();
+        ImGui::SameLine();
     }
     if (ImGui::Button("Reset controls to defaults")) input::reset_binds(), app::save_config();
     ImGui::SameLine();
@@ -421,7 +490,7 @@ void tab_presentation(app::Config& c) {
     checkbox("Boot image instead of boot text", c.boot_image, true);
     checkbox("Start skips mission movies (instead of Reload)", c.start_skips_movies, true);
     checkbox("Mission movies fill wide screens", c.movies_fill);
-    checkbox("Hide player 2's \"JOIN NOW / Press START\" panel", c.hide_p2_join, true);
+    checkbox("Hide the other ODSTs' \"JOIN NOW / Press START\" panels (all but player 1's)", c.hide_p2_join, true);
 }
 
 void draw_menu(int w, int h) {
@@ -564,7 +633,7 @@ void run() {
             uint64_t t = SDL_GetTicks64() - opened;
             if (cap_step == 0 && t > 1000) {
                 g_focus_slot = a * 8 + (pad ? 4 : 0) + slot;
-                g_capture = {true, false, pad != 0, input::Action(a), slot, SDL_GetTicks64()};
+                g_capture = {true, false, pad != 0, input::Action(a), slot, SDL_GetTicks64(), g_bind_player};
                 cap_step = 1;
             } else if (cap_step == 1 && t > 2000 && pad && input::set_virtual_button(0, code, true)) {
                 cap_step = 2;
@@ -640,17 +709,18 @@ void draw_skip_prompt() {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
     using input::Bind;
-    bool pad = *input::controller_name(0) || *input::controller_name(1);
-    Bind b = pad ? input::pad_bind(input::Action::Start, 0) : Bind{};
-    if (pad && b.kind == Bind::None) b = input::pad_bind(input::Action::Start, 1);
+    int owner = -1;  // the first player with a controller: their Start button
+    for (int p = game::player_count() - 1; p >= 0; p--)
+        if (*input::controller_name(p)) owner = p;
+    bool pad = owner >= 0;
+    Bind b = pad ? input::pad_bind(input::Action::Start, 0, owner) : Bind{};
+    if (pad && b.kind == Bind::None) b = input::pad_bind(input::Action::Start, 1, owner);
     if (b.kind == Bind::None) {
         pad = false;
         b = input::key_bind(input::Action::Start, 0);
         if (b.kind == Bind::None) b = input::key_bind(input::Action::Start, 1);
     }
-    PadStyle style = input::controller_is_playstation(0) || (!*input::controller_name(0) && input::controller_is_playstation(1))
-                         ? PadStyle::PlayStation
-                         : PadStyle::Xbox;
+    PadStyle style = pad && input::controller_is_playstation(owner) ? PadStyle::PlayStation : PadStyle::Xbox;
     // Sizes in ImGui display units (the window), from the game's prompt: text ~5% of the height, centered 3.6% down.
     ImVec2 disp = io.DisplaySize;
     float size = disp.y * 0.066f, glyph_h = size * 0.85f;

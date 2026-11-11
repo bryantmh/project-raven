@@ -4,19 +4,19 @@
 // fed by the hooked SDL_PollEvent), 0x201+ are analog channels and cabinet I/O boards. Game code asks for logical
 // switches (0x208 Gun0Trigger0, 0x24e CabStart0, 0x256 CabDiag, ...) through a physical->logical remap table that
 // IoRemapAdd (0x4acdb0) appends to. We add our own entries so keys drive the cabinet switches; controllers and
-// mouse buttons drive those keys (F13-F20, which no keyboard sends).
+// mouse buttons drive those keys (scancodes no keyboard sends).
 //
 // Aim: the game runs in mouse mode (src/game/patches.cpp), which remaps the PC driver's mouse analog channels
 // (physical 0x201/0x202) to every gun's X/Y. Gun aim expects 0..1, but the driver stores SDL_MOUSEMOTION's pixel
-// coordinates, so we keep mouse events from the game and write player 1's normalized aim into those channels every
-// frame. Player 2 gets its own aim: its gun's axes are unhooked from the mouse channels and written directly.
+// coordinates, so we keep mouse events from the game and write gun 0's aim into those channels every frame. Guns
+// 1-3 get their own aim: their axes are unhooked from the mouse channels and fed from channels of ours.
 //
-// The 2-player cabinet uses player slots 0 and 3 (the join loop 0x4269e0 skips slots 1 and 2 on this cabinet
-// type, and 0x4178d0 reads slot 3's gun enable from hardware/p2gun): player 2 is gun 3 (aim 0x22a/0x22b, triggers
-// 0x22c-0x22e) with CabStart3 (0x251).
+// Players and guns: each gun slot (0-3) is one ODST (src/game/players.cpp). The 2-player cabinet uses slots 0 and 3,
+// the 4-player cabinet all four. Each player plays the slot of the ODST they picked (game::player_slot), so the
+// virtual keys and aim channels below belong to slots, and every frame each slot takes the state of its player.
 //
-// Buttons come from the remappable bindings (src/input/bindings.cpp): every player's controller uses the same
-// controller bindings; the keyboard and mouse drive player 1.
+// Buttons come from the remappable bindings (src/input/bindings.cpp): each player has their own controller
+// bindings; the keyboard and mouse drive player 1.
 #include "input/input.h"
 
 #include <windows.h>
@@ -33,6 +33,7 @@
 #include "app/config.h"
 #include "input/bindings.h"
 #include "game/movie_skip.h"
+#include "game/players.h"
 #include "game/triggers.h"
 #include "game/ui_aspect.h"
 #include "linux/shim.h"
@@ -46,15 +47,18 @@ namespace {
 using IoRemapAdd = SYSV int (*)(int physical, int logical);
 using IoRemapRemove = SYSV int (*)(int physical, int logical);
 constexpr uint64_t kIoRemapRemove = 0x4ace10;
-// Player 2's gun (gun 3) aim: logical 0x22a X / 0x22b Y, plus the second pair mouse mode feeds every gun
-// (0x2a3 + 3k / 0x2a4 + 3k, remap builder 0x41baf0): 0x2ac / 0x2ad. The I/O core fills logical channels every
-// frame by copying each remap's physical channel over them (0x4ad6e8), and game code only uses a gun whose axes
-// have a remap source (0x4acfe0), so player 2 needs physical channels of its own: see install_p2_channels.
-constexpr int kP2AimLogical[2][2] = {{0x22a, 0x2ac}, {0x22b, 0x2ad}};  // [x / y][pair]
-constexpr int kP2Physical[2] = {0x210, 0x211};                          // unused physical analog IDs
+constexpr int kPlayers = game::kMaxPlayers;
+constexpr int kGuns = 4;
+// Gun k's aim: logical X 0x206 + 12k / Y 0x207 + 12k, plus the second pair mouse mode feeds every gun
+// (0x2a3 + 3k / 0x2a4 + 3k, remap builder 0x41baf0). The I/O core fills logical channels every frame by copying each
+// remap's physical channel over them (0x4ad6e8), and game code only uses a gun whose axes have a remap source
+// (0x4acfe0), so guns 1-3 need physical channels of their own: see install_gun_channels.
+int aim_logical(int gun, int axis, int pair) { return pair == 0 ? 0x206 + 12 * gun + axis : 0x2a3 + 3 * gun + axis; }
+// Unused physical analog IDs for guns 1-3 (X, Y). Gun 3 (the 2-player cabinet's player 2) keeps 0x210 / 0x211.
+constexpr int kGunPhysical[4][2] = {{0, 0}, {0x212, 0x213}, {0x214, 0x215}, {0x210, 0x211}};
 constexpr uint64_t kPhysAnalogTable = 0x11bcd70;  // int32 offsets (from the table) per physical 0x201..0x3c5 (0x61ee70)
-alignas(16) uint8_t g_p2_channels[2][0x48];       // player 2's physical X / Y channels (AnalogSet layout)
-bool g_p2_ready = false;
+alignas(16) uint8_t g_gun_channels[kGuns][2][0x48];  // guns 1-3's physical X / Y channels (AnalogSet layout)
+bool g_guns_ready = false;
 using AnalogSet = SYSV void (*)(void* channel, float v);
 constexpr uint64_t kIoRemapAdd = 0x4acdb0;
 constexpr uint64_t kRemapCount = 0x1771850;              // int
@@ -62,13 +66,15 @@ constexpr uint64_t kRemapTable = 0x1766f40 + 0x1122 * 8;  // {int physical, int 
 constexpr uint64_t kAnalogSet = 0x61cdc0;
 constexpr uint64_t kIoState = 0x180adf0;                  // PC driver state; mouse X/Y channels at +0x6000/+0x6048
 
-// Per-player virtual keys: the gun's fire trigger, reload button (Trigger1), grenade button (Trigger2) and START.
-struct PlayerKeys {
+// Per-slot virtual keys: the gun's fire trigger, reload button (Trigger1), grenade button (Trigger2) and START.
+// Scancodes no keyboard sends: F13-F24, and 0xe8-0xeb (reserved in USB HID, unnamed in SDL).
+struct SlotKeys {
     SDL_Scancode trigger, alt1, alt2, start;
 };
-constexpr int kPlayers = 2;
-const PlayerKeys kKeys[kPlayers] = {
+const SlotKeys kKeys[kGuns] = {
     {SDL_SCANCODE_F13, SDL_SCANCODE_F14, SDL_SCANCODE_F15, SDL_SCANCODE_F16},
+    {SDL_SCANCODE_F21, SDL_SCANCODE_F22, SDL_SCANCODE_F23, SDL_SCANCODE_F24},
+    {SDL_Scancode(0xe8), SDL_Scancode(0xe9), SDL_Scancode(0xea), SDL_Scancode(0xeb)},
     {SDL_SCANCODE_F17, SDL_SCANCODE_F18, SDL_SCANCODE_F19, SDL_SCANCODE_F20},
 };
 
@@ -76,15 +82,23 @@ struct Binding {
     int scancode;
     int logical;
 };
-// Scancodes are SDL's, which the game's PC driver uses as physical IDs. Gun k's triggers are 0x208/9/a + 12k.
-// Fixed operator keys (a key bound to an action is never passed to the game, so these can't clash).
-const Binding kBindings[] = {
-    {SDL_SCANCODE_5, 0x257},      // Cab0Coin0
-    {SDL_SCANCODE_F2, 0x256},     // CabDiag (TEST)
-    {SDL_SCANCODE_F3, 0x288},     // Cab0Service
-    {SDL_SCANCODE_F13, 0x208}, {SDL_SCANCODE_F14, 0x209}, {SDL_SCANCODE_F15, 0x20a}, {SDL_SCANCODE_F16, 0x24e},
-    {SDL_SCANCODE_F17, 0x22c}, {SDL_SCANCODE_F18, 0x22d}, {SDL_SCANCODE_F19, 0x22e}, {SDL_SCANCODE_F20, 0x251},
-};
+// Scancodes are SDL's, which the game's PC driver uses as physical IDs. Gun k's triggers are 0x208/9/a + 12k and
+// its start CabStart<k> 0x24e + k. Fixed operator keys (a key bound to an action is never passed to the game, so
+// these can't clash).
+std::vector<Binding> bindings() {
+    std::vector<Binding> b = {
+        {SDL_SCANCODE_5, 0x257},   // Cab0Coin0
+        {SDL_SCANCODE_F2, 0x256},  // CabDiag (TEST)
+        {SDL_SCANCODE_F3, 0x288},  // Cab0Service
+    };
+    for (int k = 0; k < kGuns; k++) {
+        b.push_back({kKeys[k].trigger, 0x208 + 12 * k});
+        b.push_back({kKeys[k].alt1, 0x209 + 12 * k});
+        b.push_back({kKeys[k].alt2, 0x20a + 12 * k});
+        b.push_back({kKeys[k].start, 0x24e + k});
+    }
+    return b;
+}
 
 bool remap_present(int phys, int logical) {
     int n = *reinterpret_cast<const int*>(kRemapCount);
@@ -96,49 +110,52 @@ bool remap_present(int phys, int logical) {
 
 void ensure_bindings() {
     // The game rebuilds its remap table during init, so re-add ours whenever they're missing.
+    static const std::vector<Binding> kBindings = bindings();
     for (auto& b : kBindings)
         if (!remap_present(b.scancode, b.logical)) {
             reinterpret_cast<IoRemapAdd>(kIoRemapAdd)(b.scancode, b.logical);
             RLOG("input: bound scancode %d -> logical %#x", b.scancode, b.logical);
         }
-    // Player 2's gun aims on its own: its axes come from player 2's physical channels, not the mouse.
-    if (!g_p2_ready) return;
-    for (int axis = 0; axis < 2; axis++)
-        for (int logical : kP2AimLogical[axis]) {
-            int mouse = 0x201 + axis;
-            if (remap_present(mouse, logical)) reinterpret_cast<IoRemapRemove>(kIoRemapRemove)(mouse, logical);
-            if (!remap_present(kP2Physical[axis], logical)) {
-                reinterpret_cast<IoRemapAdd>(kIoRemapAdd)(kP2Physical[axis], logical);
-                RLOG("input: player 2 physical %#x -> logical %#x", kP2Physical[axis], logical);
+    // Guns 1-3 aim on their own: their axes come from their physical channels, not the mouse.
+    if (!g_guns_ready) return;
+    for (int gun = 1; gun < kGuns; gun++)
+        for (int axis = 0; axis < 2; axis++)
+            for (int pair = 0; pair < 2; pair++) {
+                int logical = aim_logical(gun, axis, pair), mouse = 0x201 + axis, phys = kGunPhysical[gun][axis];
+                if (remap_present(mouse, logical)) reinterpret_cast<IoRemapRemove>(kIoRemapRemove)(mouse, logical);
+                if (!remap_present(phys, logical)) {
+                    reinterpret_cast<IoRemapAdd>(kIoRemapAdd)(phys, logical);
+                    RLOG("input: gun %d physical %#x -> logical %#x", gun, phys, logical);
+                }
             }
-        }
 }
 
-// Give the PC driver two more physical analog channels (IDs 0x210 / 0x211, which return none): their entries in
-// the driver's lookup table (0x61ee70) point at stubs returning g_p2_channels. The table holds 32-bit offsets
-// from itself, so the stubs live just above the game image.
-void install_p2_channels() {
+// Give the PC driver more physical analog channels (IDs 0x210-0x215, which return none): their entries in the
+// driver's lookup table (0x61ee70) point at stubs returning g_gun_channels. The table holds 32-bit offsets from
+// itself, so the stubs live just above the game image.
+void install_gun_channels() {
     uint8_t* stubs = nullptr;
     for (uint64_t at = 0x2400000; !stubs && at < 0x40000000; at += 0x10000)
         stubs = static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(at), 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
     if (!stubs) {
-        RLOG("input: no memory near the game for player 2's channels; player 2 aims with player 1");
+        RLOG("input: no memory near the game for the guns' channels; every gun aims with the mouse channels");
         return;
     }
-    for (int axis = 0; axis < 2; axis++) {
-        uint8_t* stub = stubs + axis * 16;
-        uint64_t channel = reinterpret_cast<uint64_t>(g_p2_channels[axis]);
-        stub[0] = 0x48, stub[1] = 0xB8;  // mov rax, imm64
-        std::memcpy(stub + 2, &channel, 8);
-        stub[10] = 0xC3;                 // ret
-        auto entry = reinterpret_cast<int32_t*>(kPhysAnalogTable + uint64_t(kP2Physical[axis] - 0x201) * 4);
-        DWORD old = 0;
-        VirtualProtect(entry, 4, PAGE_READWRITE, &old);
-        *entry = int32_t(reinterpret_cast<int64_t>(stub) - int64_t(kPhysAnalogTable));
-        VirtualProtect(entry, 4, old, &old);
-    }
-    g_p2_ready = true;
-    RLOG("input: player 2 physical channels at %p", stubs);
+    for (int gun = 1; gun < kGuns; gun++)
+        for (int axis = 0; axis < 2; axis++) {
+            uint8_t* stub = stubs + (gun * 2 + axis) * 16;
+            uint64_t channel = reinterpret_cast<uint64_t>(g_gun_channels[gun][axis]);
+            stub[0] = 0x48, stub[1] = 0xB8;  // mov rax, imm64
+            std::memcpy(stub + 2, &channel, 8);
+            stub[10] = 0xC3;                 // ret
+            auto entry = reinterpret_cast<int32_t*>(kPhysAnalogTable + uint64_t(kGunPhysical[gun][axis] - 0x201) * 4);
+            DWORD old = 0;
+            VirtualProtect(entry, 4, PAGE_READWRITE, &old);
+            *entry = int32_t(reinterpret_cast<int64_t>(stub) - int64_t(kPhysAnalogTable));
+            VirtualProtect(entry, 4, old, &old);
+        }
+    g_guns_ready = true;
+    RLOG("input: gun 1-3 physical channels at %p", stubs);
 }
 
 void push_key(int scancode, bool down) {
@@ -152,18 +169,22 @@ void push_key(int scancode, bool down) {
 }
 
 // A virtual switch that sends a key event when its state changes.
-// RAVEN_INPUTDEBUG=1 logs every virtual switch change (which player pressed what).
+// RAVEN_INPUTDEBUG=1 logs every virtual switch change (which slot pressed what).
 struct Switch {
     bool down = false;
     void set(SDL_Scancode sc, bool d) {
         static bool debug = std::getenv("RAVEN_INPUTDEBUG") != nullptr;
         if (d != down) {
             push_key(sc, d);
-            if (debug) RLOG("inputdebug: %s %s", SDL_GetScancodeName(sc), d ? "down" : "up");
+            if (debug) RLOG("inputdebug: %s (%d) %s", SDL_GetScancodeName(sc), int(sc), d ? "down" : "up");
         }
         down = d;
     }
 };
+// Each gun slot's switches: whoever plays that ODST presses them.
+struct SlotSwitches {
+    Switch trigger, alt1, alt2, start;
+} g_slots[kGuns];
 
 // The last aims written, newest first (the game draws its crosshairs a frame or more behind).
 constexpr int kAimHistory = 16;
@@ -171,13 +192,14 @@ constexpr int kAimHistory = 16;
 struct Player {
     SDL_GameController* pad = nullptr;
     SDL_JoystickID id = -1;
-    Switch trigger, alt1, alt2, start;
+    bool trigger = false;  // fire held (rumble)
     float aim_x = 0.5f, aim_y = 0.5f;
     bool start_held = false;
     int skip_frames = 0;  // frames left of a reload press sent to skip a movie (src/game/movie_skip.cpp)
     float hist_x[kAimHistory] = {}, hist_y[kAimHistory] = {};
     int hist_n = 0;
     uint64_t next_rumble = 0;
+    int led_slot = -1;  // the ODST whose color the controller's light shows
 };
 Player g_players[kPlayers];
 
@@ -185,27 +207,44 @@ Player g_players[kPlayers];
 bool g_keys_down[SDL_NUM_SCANCODES] = {};
 unsigned g_mouse_buttons = 0;
 
+// Each ODST's color on its JOIN NOW panel (Graves blue, Hudson orange, Ramos green, Lang purple), for the
+// controller light.
+constexpr uint8_t kSlotColors[kGuns][3] = {{0, 110, 255}, {255, 90, 0}, {40, 200, 40}, {150, 40, 255}};
+void update_led(Player& p, int slot) {
+    if (!p.pad || slot < 0 || slot == p.led_slot) return;
+    p.led_slot = slot;
+    if (SDL_GameControllerHasLED(p.pad)) SDL_GameControllerSetLED(p.pad, kSlotColors[slot][0], kSlotColors[slot][1], kSlotColors[slot][2]);
+}
+
 void write_aim() {
     auto base = *reinterpret_cast<uint8_t* const*>(kIoState);
     if (!base) return;
-    for (auto& p : g_players) {
-        for (int i = kAimHistory - 1; i > 0; i--) p.hist_x[i] = p.hist_x[i - 1], p.hist_y[i] = p.hist_y[i - 1];
+    for (int i = 0; i < game::player_count(); i++) {
+        auto& p = g_players[i];
+        for (int k = kAimHistory - 1; k > 0; k--) p.hist_x[k] = p.hist_x[k - 1], p.hist_y[k] = p.hist_y[k - 1];
         p.hist_x[0] = p.aim_x;
         p.hist_y[0] = p.aim_y;
         if (p.hist_n < kAimHistory) p.hist_n++;
     }
     auto set = reinterpret_cast<AnalogSet>(kAnalogSet);
-    const Player &p1 = g_players[0], &p2 = g_players[1];
-    set(base + 0x6000, p1.aim_x);
-    set(base + 0x6048, p1.aim_y);
-    // Gun channels hold y from the bottom (the mouse Y channel's flags flip it for player 1).
-    set(g_p2_channels[0], p2.aim_x);
-    set(g_p2_channels[1], 1.0f - p2.aim_y);
+    for (int gun = 0; gun < kGuns; gun++) {
+        float x = 0.5f, y = 0.5f;
+        for (int i = 0; i < game::player_count(); i++)
+            if (game::player_slot(i) == gun) x = g_players[i].aim_x, y = g_players[i].aim_y;
+        if (gun == 0) {
+            set(base + 0x6000, x);
+            set(base + 0x6048, y);
+        } else if (g_guns_ready) {
+            // Gun channels hold y from the bottom (the mouse Y channel's flags flip it for gun 0).
+            set(g_gun_channels[gun][0], x);
+            set(g_gun_channels[gun][1], 1.0f - y);
+        }
+    }
 }
 
 void open_pad(int device_index) {
     if (!SDL_IsGameController(device_index)) return;
-    // Automated test runs (RAVEN_HEADLESS) use only the script's virtual controller: real controllers are never
+    // Automated test runs (RAVEN_HEADLESS) use only the script's virtual controllers: real controllers are never
     // opened, so a test can't rumble, recolor or read the controllers the user is busy with.
     static const bool headless = std::getenv("RAVEN_HEADLESS") != nullptr;
     if (headless && !SDL_JoystickIsVirtual(device_index)) {
@@ -216,18 +255,16 @@ void open_pad(int device_index) {
     for (auto& p : g_players)
         if (p.pad && p.id == id) return;
     // Controllers fill the players in order; with "keyboard & mouse is player 1" they start at player 2.
-    for (int i = app::config().kbm_own_player ? 1 : 0; i < kPlayers; i++) {
+    for (int i = app::config().kbm_own_player ? 1 : 0; i < game::player_count(); i++) {
         auto& p = g_players[i];
         if (p.pad) continue;
         p.pad = SDL_GameControllerOpen(device_index);
         if (!p.pad) return;
         p.id = id;
+        p.led_slot = -1;
         RLOG("input: player %d controller \"%s\" (%s)", i + 1, SDL_GameControllerName(p.pad),
              SDL_GameControllerHasRumble(p.pad) ? "rumble" : "no rumble");
-        if (SDL_GameControllerHasLED(p.pad)) {
-            static const uint8_t colors[kPlayers][3] = {{0, 160, 255}, {255, 60, 0}};
-            SDL_GameControllerSetLED(p.pad, colors[i][0], colors[i][1], colors[i][2]);
-        }
+        update_led(p, game::player_slot(i));
         return;
     }
 }
@@ -239,10 +276,7 @@ void close_pad(SDL_JoystickID id) {
         SDL_GameControllerClose(p.pad);
         p.pad = nullptr;
         p.id = -1;
-        p.trigger.set(kKeys[i].trigger, false);
-        p.alt1.set(kKeys[i].alt1, false);
-        p.alt2.set(kKeys[i].alt2, false);
-        p.start.set(kKeys[i].start, false);
+        p.trigger = false;
         RLOG("input: player %d controller removed", i + 1);
     }
 }
@@ -282,7 +316,7 @@ void stick_aim(Player& p, float dt, float dx, float dy) {
 // Recoil rumble: a short pulse every 100 ms while the trigger is held.
 void rumble(Player& p, uint64_t now) {
     int strength = std::clamp(app::config().rumble, 0, 100);
-    if (!p.pad || !p.trigger.down || strength == 0 || now < p.next_rumble) return;
+    if (!p.pad || !p.trigger || strength == 0 || now < p.next_rumble) return;
     p.next_rumble = now + 100;
     auto lo = uint16_t(0x5000 * strength / 100), hi = uint16_t(0xd000 * strength / 100);
     SDL_GameControllerRumble(p.pad, lo, hi, 70);
@@ -291,14 +325,14 @@ void rumble(Player& p, uint64_t now) {
 // RAVEN_TEST_KEYS="seconds:kind:args,...": scripted input for automated runs.
 //   down:<scancode> / up:<scancode>     key press / release (as the real keyboard: through the bindings)
 //   move:<x>:<y>                        player 1 aims at (x, y) in 1920x1080 coordinates
-//   movb:<x>:<y>                        player 2 aims at (x, y)
+//   movb / movc / movd:<x>:<y>          player 2 / 3 / 4 aims at (x, y)
 //   cursor:<x>:<y>                      mouse motion to window pixel (x, y), as the real mouse
 //   mdown:<button> / mup:<button>       mouse button (1 left = fire, 3 right = reload, 2 middle = grenade)
 //   shot:<n>                            save the next n frames (needs RAVEN_SHOT)
 //   aspect:<0|1|2>                      Aspect ratio setting (auto / 16:9 / 21:9), live
-//   pad:<n>                             attach virtual Xbox-layout controller n (0 or 1; SDL virtual joystick)
+//   pad:<n>                             attach virtual Xbox-layout controller n (0-3; SDL virtual joystick)
 //   pbtn:<SDL_GameControllerButton>:<0|1>, paxis:<SDL_GameControllerAxis>:<-32768..32767>   drive controller 0
-//   pbtnb / paxisb                      the same for controller 1
+//   pbtnb / paxisb, pbtnc / paxisc, pbtnd / paxisd   the same for controllers 1, 2, 3
 struct ScriptStep {
     double t;
     std::string kind;
@@ -335,9 +369,9 @@ void mouse_button(int button, bool down) {
 
 // A virtual controller for automated runs. Its buttons and axes are numbered like SDL_GameController's, which
 // SDL maps through the virtual joystick's button/axis masks.
-SDL_Joystick* g_virtual[2] = {};
+SDL_Joystick* g_virtual[kPlayers] = {};
 void attach_virtual_pad(int n) {
-    n = std::clamp(n, 0, 1);
+    n = std::clamp(n, 0, kPlayers - 1);
     SDL_VirtualJoystickDesc d{};
     d.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
     d.type = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
@@ -345,7 +379,9 @@ void attach_virtual_pad(int n) {
     d.nbuttons = SDL_CONTROLLER_BUTTON_MAX;
     d.axis_mask = (1u << SDL_CONTROLLER_AXIS_MAX) - 1;
     d.button_mask = (1u << SDL_CONTROLLER_BUTTON_MAX) - 1;
-    d.name = n ? "Raven test controller 2" : "Raven test controller";
+    static const char* const names[kPlayers] = {"Raven test controller", "Raven test controller 2",
+                                                "Raven test controller 3", "Raven test controller 4"};
+    d.name = names[n];
     int index = SDL_JoystickAttachVirtualEx(&d);
     if (index < 0) {
         RLOG("input: virtual controller failed: %s", SDL_GetError());
@@ -359,7 +395,7 @@ void attach_virtual_pad(int n) {
 }  // namespace
 
 bool set_virtual_button(int n, int button, bool down) {
-    if (n < 0 || n > 1 || !g_virtual[n]) return false;
+    if (n < 0 || n >= kPlayers || !g_virtual[n]) return false;
     SDL_JoystickSetVirtualButton(g_virtual[n], button, down ? 1 : 0);
     return true;
 }
@@ -401,7 +437,10 @@ void run_script() {
                 SDL_PushEvent(&e);  // through the event pump, like the real keyboard (menu, bindings, game)
             }
             else if (s.kind == "move") g_players[0].aim_x = s.a / 1920.0f, g_players[0].aim_y = s.b / 1080.0f;
-            else if (s.kind == "movb") g_players[1].aim_x = s.a / 1920.0f, g_players[1].aim_y = s.b / 1080.0f;
+            else if (s.kind == "movb" || s.kind == "movc" || s.kind == "movd") {
+                auto& p = g_players[s.kind[3] - 'a'];
+                p.aim_x = s.a / 1920.0f, p.aim_y = s.b / 1080.0f;
+            }
             else if (s.kind == "cursor") {
                 SDL_Event e{};
                 e.type = SDL_MOUSEMOTION;
@@ -416,10 +455,15 @@ void run_script() {
                 app::config().aspect = s.a;
                 sdl::reapply_view_aspect();
             }
-            else if ((s.kind == "pbtn" || s.kind == "pbtnb") && g_virtual[s.kind == "pbtnb"])
-                SDL_JoystickSetVirtualButton(g_virtual[s.kind == "pbtnb"], s.a, uint8_t(s.b));
-            else if ((s.kind == "paxis" || s.kind == "paxisb") && g_virtual[s.kind == "paxisb"])
-                SDL_JoystickSetVirtualAxis(g_virtual[s.kind == "paxisb"], s.a, int16_t(s.b));
+            else if (s.kind.rfind("pbtn", 0) == 0 || s.kind.rfind("paxis", 0) == 0) {
+                // pbtn / pbtnb / pbtnc / pbtnd (paxis the same): controller 0-3
+                bool button = s.kind[1] == 'b';
+                size_t base = button ? 4 : 5;
+                int n = s.kind.size() > base ? s.kind[base] - 'a' : 0;
+                if (n < 0 || n >= kPlayers || !g_virtual[n]) continue;
+                if (button) SDL_JoystickSetVirtualButton(g_virtual[n], s.a, uint8_t(s.b));
+                else SDL_JoystickSetVirtualAxis(g_virtual[n], s.a, int16_t(s.b));
+            }
         }
 }
 
@@ -435,18 +479,21 @@ void io_debug() {
     RLOG("iodebug: gun0 x %.3f y %.3f | gun3 x %.3f y %.3f | gun3 set2 x %.3f y %.3f | p2 aim %.3f %.3f",
          ch(0x176d2a0, 4), ch(0x176d2e8, 4), ch(0x176d9f0, 4), ch(0x176da38, 4), ch(0x176eb48, 4), ch(0x176ec68, 4),
          g_players[1].aim_x, g_players[1].aim_y);
+    for (int gun = 1; gun < kGuns; gun++)
+        RLOG("iodebug: gun %d channels x %.3f y %.3f", gun, ch(uint64_t(g_gun_channels[gun][0]), 4), ch(uint64_t(g_gun_channels[gun][1]), 4));
 }
 }  // namespace
 
 int aim_history(int player, const float** xs, const float** ys) {
-    auto& p = g_players[std::clamp(player, 0, kPlayers - 1)];
+    if (player < 0 || player >= game::player_count()) return 0;
+    auto& p = g_players[player];
     *xs = p.hist_x;
     *ys = p.hist_y;
     return p.hist_n;
 }
 
 bool aim(int player, float* x, float* y) {
-    if (player < 0 || player >= kPlayers) return false;
+    if (player < 0 || player >= game::player_count()) return false;
     *x = g_players[player].aim_x;
     *y = g_players[player].aim_y;
     return true;
@@ -499,6 +546,12 @@ bool controller_is_playstation(int player) {
     return t == SDL_CONTROLLER_TYPE_PS3 || t == SDL_CONTROLLER_TYPE_PS4 || t == SDL_CONTROLLER_TYPE_PS5;
 }
 
+int player_of_controller(int32_t joystick_id) {
+    for (int i = 0; i < kPlayers; i++)
+        if (g_players[i].pad && g_players[i].id == joystick_id) return i;
+    return -1;
+}
+
 void reassign_controllers() {
     for (int i = 0; i < kPlayers; i++)
         if (g_players[i].pad) close_pad(g_players[i].id);
@@ -512,7 +565,7 @@ void frame() {
     if (!init) {
         init = true;
         g_start = last = now;
-        install_p2_channels();
+        install_gun_channels();
         load_script();
         for (int i = 0; i < SDL_NumJoysticks(); i++) open_pad(i);
     }
@@ -522,11 +575,17 @@ void frame() {
     run_script();
     game::update_movie_skip();
     bool movie_prompt = game::movie_skip_prompt();
-    for (int i = 0; i < kPlayers; i++) {
+    struct SlotState {
+        bool trigger = false, alt1 = false, alt2 = false, start = false;
+    } slots[kGuns];
+    for (int i = 0; i < game::player_count(); i++) {
         auto& p = g_players[i];
-        // Player 1 has the keyboard and mouse (with or without a controller); every controller the same bindings.
+        int slot = game::player_slot(i);
+        update_led(p, slot);
+        // Player 1 has the keyboard and mouse (with or without a controller); each player their own controller
+        // bindings.
         auto on = [&](Action a) {
-            return pad_action(p.pad, a) || (i == 0 && key_action(a, reinterpret_cast<const unsigned char*>(g_keys_down), g_mouse_buttons));
+            return pad_action(i, p.pad, a) || (i == 0 && key_action(a, reinterpret_cast<const unsigned char*>(g_keys_down), g_mouse_buttons));
         };
         bool trig = on(Action::Fire), alt1 = on(Action::Reload), alt2 = on(Action::Grenade), start = on(Action::Start);
         // Mission movies: once the skip prompt is up, Start skips (as the reload press the movie waits for) and
@@ -540,11 +599,16 @@ void frame() {
         float dx = float(on(Action::AimRight)) - float(on(Action::AimLeft));
         float dy = float(on(Action::AimDown)) - float(on(Action::AimUp));
         stick_aim(p, dt, dx, dy);
-        p.trigger.set(kKeys[i].trigger, trig);
-        p.alt1.set(kKeys[i].alt1, alt1);
-        p.alt2.set(kKeys[i].alt2, alt2);
-        p.start.set(kKeys[i].start, start);
+        p.trigger = trig;
+        if (slot >= 0) slots[slot] = {trig, alt1, alt2, start};
         rumble(p, now);
+    }
+    // Every slot follows its player; a slot nobody plays (or one a player just left for another ODST) is released.
+    for (int k = 0; k < kGuns; k++) {
+        g_slots[k].trigger.set(kKeys[k].trigger, slots[k].trigger);
+        g_slots[k].alt1.set(kKeys[k].alt1, slots[k].alt1);
+        g_slots[k].alt2.set(kKeys[k].alt2, slots[k].alt2);
+        g_slots[k].start.set(kKeys[k].start, slots[k].start);
     }
     write_aim();
     io_debug();

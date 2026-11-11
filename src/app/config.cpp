@@ -69,6 +69,7 @@ const Field kFields[] = {
     {"difficulty", nullptr, nullptr, &Config::difficulty},
     {"subtitles", nullptr, &Config::subtitles},
     {"game_volume", nullptr, nullptr, &Config::game_volume},
+    {"four_players", nullptr, &Config::four_players},
     {"window_width", nullptr, nullptr, &Config::window_width},
     {"window_height", nullptr, nullptr, &Config::window_height},
     {"display_mode", nullptr, nullptr, &Config::display_mode},
@@ -110,8 +111,13 @@ void load_config() {
         else if (fd.b) g_config.*fd.b = it->second == "true";
         else if (fd.i) g_config.*fd.i = std::atoi(it->second.c_str());
     }
+    for (int n = 0; n < 4; n++) {
+        auto it = kv.find("odst_p" + std::to_string(n + 1));
+        if (it != kv.end()) g_config.odst[n] = std::atoi(it->second.c_str());
+    }
     for (auto& [k, v] : kv)
-        if (k.rfind("pad_", 0) == 0 || k.rfind("key_", 0) == 0) g_config.binds[k] = v;
+        if (k.rfind("pad_", 0) == 0 || k.rfind("key_", 0) == 0 || (k.size() > 3 && k[0] == 'p' && k.compare(2, 5, "_pad_") == 0))
+            g_config.binds[k] = v;  // "pad_*", "key_*", "p<n>_pad_*"
     // Migrations. 1 -> 2: presentation/display settings added (defaults apply). 2 -> 3: the UI layout default
     // changed from stretched to corners (version 2 only offered stretched as the safe choice).
     if (file_version < 3) g_config.ui_layout = 2;
@@ -140,8 +146,10 @@ void save_config() {
         if (fd.s) f << '"' << escape(g_config.*fd.s) << '"';
         else if (fd.b) f << (g_config.*fd.b ? "true" : "false");
         else f << g_config.*fd.i;
-        f << (n + 1 < std::size(kFields) || !g_config.binds.empty() ? ",\n" : "\n");
+        f << ",\n";
     }
+    for (int n = 0; n < 4; n++)
+        f << "  \"odst_p" << n + 1 << "\": " << g_config.odst[n] << (n < 3 || !g_config.binds.empty() ? ",\n" : "\n");
     size_t m = 0;
     for (auto& [k, v] : g_config.binds)
         f << "  \"" << escape(k) << "\": \"" << escape(v) << '"' << (++m < g_config.binds.size() ? ",\n" : "\n");

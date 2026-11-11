@@ -1,7 +1,7 @@
 # Project Raven
 
 Play the arcade game **Halo: Fireteam Raven** on a Windows PC: with a controller or mouse and keyboard, alone or
-with a friend. It contains a few QOL enhancements as well including ultrawide aspect ratios and unlocked framerates
+with up to three friends. It contains a few QOL enhancements as well including ultrawide aspect ratios and unlocked framerates
 
 You need your own copy of the arcade game files. Nothing from the game is included here.
 
@@ -29,27 +29,35 @@ The controller defaults. You can change any of them in the settings menu.
 
 Rumble works on Xbox and PlayStation controllers.
 
-## Two players
+## More players
 
-Connect two controllers: the first is player 1, the second is player 2. Each player aims and shoots on their own.
-The keyboard and mouse always control player 1.
+Connect a controller for each player: the first is player 1, the second player 2, and so on. Each player aims and
+shoots on their own. The keyboard and mouse always control player 1.
+
+The game plays as the original 2-player cabinet by default. For 3 or 4 players, set **Settings > Gameplay > Players**
+to **Up to 4** and restart: the game then runs as its 4-player cabinet, with all four ODSTs and a HUD for each.
+
+Each ODST has their own seat. Pick who plays which in **Settings > Controls**: Ethan Graves (blue), Marcus Hudson
+(orange), Victor Ramos (green) or Ava Lang (purple), the color of their JOIN NOW panel, HUD and crosshair. The
+2-player cabinet has Graves and Lang. Each player also has their own controller buttons.
 
 Want mouse and keyboard for player 1 and a controller for player 2? Turn on **Keyboard & mouse is player 1,
 controllers start at player 2** in **Settings > Controls**.
 
-Player 2 joins by pressing Start during a mission.
+Players join by pressing Start, also during a mission.
 
 ## Settings menu
 
 Press **Select** or **F1**. The game pauses while the menu is open. **L1 / R1** (or **Q / E**) switch tabs.
 
-- **Gameplay**: difficulty. **Normal** (the default) means steady damage for the whole mission. **Easy**, **Heroic** and
+- **Gameplay**: players (up to 2 or up to 4) and difficulty. **Normal** (the default) means steady damage for the whole mission. **Easy**, **Heroic** and
   **Legendary** take half, double and triple damage. **Arcade** is the original: you can't die for the first couple of
   minutes, then damage climbs fast to end the credit. Difficulty can be changed in the middle of a mission. Also
   subtitles in mission movies (off by default; switching them works while a movie plays) and the game volume.
 - **Display**: windowed, borderless or fullscreen; resolution; aspect ratio (Auto, 16:9, 21:9); how the HUD is laid
   out on wide screens; VSync and frame rate limit.
-- **Controls**: remap any action (two controller buttons and two keys each). Click a slot and press the new button.
+- **Controls**: which ODST each player plays, and remapping: any action, two controller buttons per player and
+  two keys each. Click a slot and press the new button.
   Right-click a slot, or press X / Square on it, to clear it. You can also set rumble strength, aim speed and stick
   deadzone. The button icons match your controller (Xbox or PlayStation).
 - **Presentation**: hide the arcade's "Money In" and "FREEPLAY" text, the menu countdown, the Xbox Live screen and

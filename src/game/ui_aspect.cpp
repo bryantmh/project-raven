@@ -4,7 +4,8 @@
 // canvas is stretched. We fix each element as its matrix goes to GL (src/gl/gl_bridge.cpp):
 //   1  16:9: undo the stretch about the screen center, so the canvas shows as a centered 16:9 area.
 //   2  corners: undo the stretch about each element's own center, and move elements in the outer 20% of the
-//      canvas out to the real screen edges (so HUD corners stay in the corners), the middle ones toward the center.
+//      canvas (the outer quarters on the 4-player cabinet, one ODST's HUD each) out to the real screen edges (so HUD
+//      corners stay in the corners), the middle ones toward the center.
 // 3D (perspective) and full-screen passes (unit quads scaled by 2) are left alone.
 #include "game/ui_aspect.h"
 
@@ -23,6 +24,7 @@
 #include "input/input.h"
 #include "log.h"
 #include "sdl/sdl_bridge.h"
+#include "game/players.h"
 #include "game/view_aspect.h"
 
 namespace raven::game {
@@ -74,7 +76,7 @@ int g_draw_lo = 0, g_draw_hi = 3;
 // The mesh's horizontal extent on screen (clip space), from the positions of the vertices this draw uses; false if
 // unknown. Positions come from client memory, or, for meshes in a vertex buffer, are read back once per buffer,
 // offset and range (those meshes don't change).
-bool current_extent_x(const float* m, float* x0, float* x1, bool* canvas_quad) {
+bool current_extent_x(const float* m, float* x0, float* x1, bool* canvas_quad, float* y0 = nullptr, float* y1 = nullptr) {
     static auto geti = reinterpret_cast<void(__stdcall*)(unsigned, unsigned, int*)>(gl::real("glGetVertexAttribiv"));
     static auto get_sub = reinterpret_cast<void(__stdcall*)(unsigned, intptr_t, intptr_t, void*)>(gl::real("glGetBufferSubData"));
     static auto bind = reinterpret_cast<void(__stdcall*)(unsigned, unsigned)>(gl::real("glBindBuffer"));
@@ -108,15 +110,19 @@ bool current_extent_x(const float* m, float* x0, float* x1, bool* canvas_quad) {
         for (int i = 0; i < n; i++) std::memcpy(&pos[size_t(i) * 3], reinterpret_cast<const void*>(p + uintptr_t(lo + i) * stride), 12);
     }
     *x0 = 1e9f, *x1 = -1e9f;
+    float ylo = 1e9f, yhi = -1e9f;
     int corners = 0;
     for (int i = 0; i < n; i++) {
         const float* v = &pos[size_t(i) * 3];
         float x = m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12];
         float y = m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13];
         *x0 = std::min(*x0, x), *x1 = std::max(*x1, x);
+        ylo = std::min(ylo, y), yhi = std::max(yhi, y);
         corners += std::fabs(std::fabs(x) - 1) < 0.002f && std::fabs(std::fabs(y) - 1) < 0.002f;
     }
     if (canvas_quad) *canvas_quad = n == 4 && corners == 4;
+    if (y0) *y0 = ylo;
+    if (y1) *y1 = yhi;
     return true;
 }
 
@@ -188,7 +194,7 @@ struct Element {
     uint64_t sprite;
     float x0, y0;       // where first seen
     float travel = 0;   // furthest from there: crosshairs move with the aim, static HUD doesn't
-    int hits[2] = {};   // per player: consecutive draws on the recent aim path while it moves
+    int hits[4] = {};   // per player: consecutive draws on the recent aim path while it moves
     bool crosshair = false;
 };
 std::vector<Element> g_elements;
@@ -215,7 +221,7 @@ bool is_crosshair(const float* m) {
         return true;
     };
     // Each player's gun has its own aim (and crosshair).
-    for (int player = 0; player < 2; player++) {
+    for (int player = 0; player < game::kMaxPlayers; player++) {
     const float *hx, *hy;
     int n = input::aim_history(player, &hx, &hy);
     if (n < 16) continue;
@@ -294,9 +300,13 @@ bool ui_before_draw(int first, int count, unsigned index_type, const void* indic
     // the game draws them, in every layout: both edges at or a little past the screen's. A single quad exactly the
     // size of the canvas isn't one: it's a layer of canvas content drawn into a texture first (the mission select's
     // highlight frame) or a movie plane (filled by gl_bridge's draw_movie_scaled), laid out like other elements.
-    float x0 = 0, x1 = 0;
+    float x0 = 0, x1 = 0, y0 = 0, y1 = 0;
     bool canvas_quad = false;
-    bool overlay = current_extent_x(m, &x0, &x1, &canvas_quad) && x0 <= -0.97f && x1 >= 0.97f && !canvas_quad;
+    bool known = current_extent_x(m, &x0, &x1, &canvas_quad, &y0, &y1);
+    bool overlay = known && x0 <= -0.97f && x1 >= 0.97f && !canvas_quad;
+    // In missions, a quad as tall as the canvas is a screen overlay for part of the screen (each player's damage
+    // tint over their quarter or half): stretched like the game draws it, so the parts still tile the screen.
+    overlay |= known && in_mission() && y0 <= -0.97f && y1 >= 0.97f && x1 - x0 < 1.9f;
     // In gameplay crosshairs follow the guns' aim, which the game maps across the whole 3D view: they must stay where
     // the game draws them, on what the shot hits (is_crosshair says how they're recognized). In the menus they are laid
     // out like everything else (see adjust).
@@ -310,15 +320,15 @@ bool ui_before_draw(int first, int count, unsigned index_type, const void* indic
         for (auto& x : seen) dup |= x == k;
         if (!dup && seen.size() < 50000) {
             seen.push_back(k);
-            RLOG("uidebug: tex %u sprite %016llx s %.6f t %.4f %.4f ext %.3f %.3f -> %s", gl::bound_texture0(),
-                 (unsigned long long)current_sprite(), m[0], m[12], m[13], x0, x1,
+            RLOG("uidebug: tex %u sprite %016llx s %.6f t %.4f %.4f ext %.3f %.3f y %.3f %.3f -> %s", gl::bound_texture0(),
+                 (unsigned long long)current_sprite(), m[0], m[12], m[13], x0, x1, y0, y1,
                  overlay ? "overlay (stretched)" : crosshair ? "crosshair (as drawn)" : "laid out");
         }
     }
     static bool debug = std::getenv("RAVEN_XHAIRDEBUG") != nullptr;
     if (debug) {
         const float* drawn = overlay || crosshair ? m : g_pending.adjusted;
-        for (int player = 0; player < 2; player++) {
+        for (int player = 0; player < game::kMaxPlayers; player++) {
             const float *hx, *hy;
             int n = input::aim_history(player, &hx, &hy);
             if (n > 0 && std::fabs(m[12] - (2 * hx[0] - 1)) < 0.15f && std::fabs(m[13] - (1 - 2 * hy[0])) < 0.15f)
@@ -367,8 +377,10 @@ bool adjust(unsigned char transpose, const float* m, float* out) {
     } else {
         // Element centers in the outer 20% of the canvas keep their distance to the nearest screen edge; the rest
         // keep their distance to the center. Both measured on the unstretched (16:9) canvas.
+        // On the 4-player cabinet each ODST's HUD fills a quarter of the canvas: the outer quarters go to the edges
+        // whole (a narrower band would leave Graves's and Lang's kill counters behind), the inner two stay centered.
         float a = std::fabs(t);
-        float edge = 0.6f;
+        float edge = game::player_count() == 4 ? 0.5f : 0.6f;
         float moved = a > edge ? 1.0f - (1.0f - a) / f : a / f;
         out[12 + row] = t < 0 ? -moved : moved;
     }
